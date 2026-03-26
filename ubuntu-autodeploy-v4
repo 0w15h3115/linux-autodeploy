@@ -324,7 +324,7 @@ mkdir -p "$I3_DIR"
 cat > "$I3_DIR/config" << 'I3CONFIG'
 # i3 config file (v4)
 
-set $mod Mod4
+set $mod Mod1
 
 font pango:monospace 8
 
