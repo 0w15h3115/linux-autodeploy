@@ -3,7 +3,8 @@
 # Ubuntu Security Tools Installation Script
 # Installs: nmap, ncat, binwalk, impacket, netexec, certipy, responder,
 #           smbclient, hashcat, i3, polybar, zsh, oh-my-zsh, kitty,
-#           proxychains, obsidian, java, dnstools
+#           proxychains, obsidian, java, dnstools, bloodhound, mitm6,
+#           enum4linux, wordlists
 
 set -euo pipefail
 
@@ -12,6 +13,8 @@ set -euo pipefail
 # ------------------------------------------------------------------------------
 
 readonly SECURITY_VENV="/opt/security-tools-venv"
+readonly WORDLIST_DIR="/usr/share/wordlists"
+readonly BLOODHOUND_DIR="/opt/BloodHound"
 
 # Colors
 readonly RED='\033[0;31m'
@@ -75,6 +78,7 @@ apt-get install -y \
     curl \
     wget \
     git \
+    jq \
     \
     python3 \
     python3-pip \
@@ -95,6 +99,7 @@ apt-get install -y \
     dnsrecon \
     nbtscan \
     adcli \
+    enum4linux \
     \
     default-jre \
     openjdk-8-jre \
@@ -122,7 +127,8 @@ apt-get install -y \
     fonts-font-awesome \
     \
     ocl-icd-libopencl1 \
-    opencl-headers
+    opencl-headers \
+    libcap2-bin
 
 # Install certipy from apt if available
 apt-get install -y python3-certipy 2>/dev/null || warn "python3-certipy not in apt, will install via pip"
@@ -131,7 +137,25 @@ apt-get install -y python3-certipy 2>/dev/null || warn "python3-certipy not in a
 apt-get install -y python3-ldapdomaindump 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# Phase 2: Snap Packages
+# Phase 2: Neo4j (for BloodHound)
+# ------------------------------------------------------------------------------
+
+msg "Installing Neo4j..."
+if ! command -v neo4j &>/dev/null; then
+    wget -O - https://debian.neo4j.com/neotechnology.gpg.key | gpg --dearmor -o /etc/apt/keyrings/neo4j.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/neo4j.gpg] https://debian.neo4j.com stable latest' \
+        > /etc/apt/sources.list.d/neo4j.list
+    apt-get update
+    apt-get install -y neo4j
+fi
+
+# Set Neo4j initial password
+systemctl enable neo4j
+neo4j-admin dbms set-initial-password bloodhound 2>/dev/null || true
+msg "Neo4j default credentials: neo4j / bloodhound"
+
+# ------------------------------------------------------------------------------
+# Phase 3: Snap Packages
 # ------------------------------------------------------------------------------
 
 msg "Setting up snap..."
@@ -146,7 +170,7 @@ msg "Installing Obsidian..."
 snap install obsidian --classic || warn "Obsidian snap install failed"
 
 # ------------------------------------------------------------------------------
-# Phase 3: Security Tools Virtual Environment (as user)
+# Phase 4: Security Tools Virtual Environment (as user)
 # ------------------------------------------------------------------------------
 
 msg "Creating security tools virtual environment..."
@@ -169,8 +193,17 @@ run_as_user "$REAL_USER" "
     pip install netifaces
     pip install aioquic
 
+    # AD enumeration and attack tools
+    pip install bloodhound
+    pip install mitm6
+
     deactivate
 "
+
+# Allow venv python to bind privileged ports and use raw sockets (needed for
+# ntlmrelayx port 445/80 and mitm6 raw IPv6 sockets) without requiring sudo
+setcap 'cap_net_bind_service=+eip cap_net_raw=+eip' "$SECURITY_VENV/bin/python3"
+msg "Set capabilities on venv python3 (ntlmrelayx/mitm6 can run without sudo)"
 
 # Install Responder
 msg "Installing Responder..."
@@ -190,8 +223,17 @@ chown -R "$REAL_USER:$REAL_USER" "$SECURITY_VENV/responder"
 chmod +x "$SECURITY_VENV/responder/Responder.py"
 rm -rf /tmp/Responder
 
+# Disable SMB and HTTP servers in Responder config (avoid conflicts with
+# ntlmrelayx which needs to handle those protocols itself)
+RESPONDER_CONF="$SECURITY_VENV/responder/Responder.conf"
+if [[ -f "$RESPONDER_CONF" ]]; then
+    sed -i 's/^SMB = On/SMB = Off/' "$RESPONDER_CONF"
+    sed -i 's/^HTTP = On/HTTP = Off/' "$RESPONDER_CONF"
+    msg "Responder: disabled SMB and HTTP servers in config"
+fi
+
 # ------------------------------------------------------------------------------
-# Phase 4: User Tools (pipx)
+# Phase 5: User Tools (pipx)
 # ------------------------------------------------------------------------------
 
 msg "Setting up pipx tools for $REAL_USER..."
@@ -214,7 +256,35 @@ run_as_user "$REAL_USER" "
 "
 
 # ------------------------------------------------------------------------------
-# Phase 5: Wrapper Scripts
+# Phase 6: BloodHound GUI
+# ------------------------------------------------------------------------------
+
+msg "Installing BloodHound GUI..."
+mkdir -p "$BLOODHOUND_DIR"
+
+BH_APPIMAGE_URL=$(curl -s https://api.github.com/repos/BloodHoundAD/BloodHound/releases/latest \
+    | jq -r '.assets[] | select(.name | test("BloodHound-linux-x64")) | .browser_download_url' \
+    | head -1)
+
+if [[ -n "$BH_APPIMAGE_URL" ]]; then
+    wget -q --show-progress -O "$BLOODHOUND_DIR/BloodHound.AppImage" "$BH_APPIMAGE_URL"
+    chmod +x "$BLOODHOUND_DIR/BloodHound.AppImage"
+    chown -R "$REAL_USER:$REAL_USER" "$BLOODHOUND_DIR"
+
+    # Create system-wide launcher
+    cat > /usr/local/bin/bloodhound-gui << 'EOF'
+#!/bin/bash
+exec /opt/BloodHound/BloodHound.AppImage --no-sandbox "$@"
+EOF
+    chmod +x /usr/local/bin/bloodhound-gui
+    msg "BloodHound GUI installed at $BLOODHOUND_DIR/BloodHound.AppImage"
+else
+    warn "Could not fetch BloodHound release URL - download manually from:"
+    warn "https://github.com/BloodHoundAD/BloodHound/releases/latest"
+fi
+
+# ------------------------------------------------------------------------------
+# Phase 7: Wrapper Scripts
 # ------------------------------------------------------------------------------
 
 msg "Creating wrapper scripts..."
@@ -236,6 +306,22 @@ exec certipy "$@"
 EOF
 chmod +x /usr/local/bin/certipy-venv
 
+# mitm6 wrapper
+cat > /usr/local/bin/mitm6 << 'EOF'
+#!/bin/bash
+source /opt/security-tools-venv/bin/activate
+exec mitm6 "$@"
+EOF
+chmod +x /usr/local/bin/mitm6
+
+# bloodhound-python wrapper
+cat > /usr/local/bin/bloodhound-python << 'EOF'
+#!/bin/bash
+source /opt/security-tools-venv/bin/activate
+exec bloodhound-python "$@"
+EOF
+chmod +x /usr/local/bin/bloodhound-python
+
 # Create symlinks for pipx tools if they exist
 USER_LOCAL_BIN="$USER_HOME/.local/bin"
 if [[ -d "$USER_LOCAL_BIN" ]]; then
@@ -248,7 +334,48 @@ if [[ -d "$USER_LOCAL_BIN" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Phase 6: Shell Configuration (Zsh + Oh My Zsh)
+# Phase 8: Wordlists
+# ------------------------------------------------------------------------------
+
+msg "Setting up wordlists..."
+mkdir -p "$WORDLIST_DIR"
+
+# rockyou
+if [[ ! -f "$WORDLIST_DIR/rockyou.txt" ]]; then
+    msg "Downloading rockyou.txt..."
+    wget -q --show-progress \
+        -O "$WORDLIST_DIR/rockyou.txt.gz" \
+        "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt" \
+        2>/dev/null || \
+    wget -q --show-progress \
+        -O "$WORDLIST_DIR/rockyou.txt.gz" \
+        "https://download.g0tmi1k.com/wordlists/large/rockyou.txt.bz2" \
+        2>/dev/null || true
+
+    if [[ -f "$WORDLIST_DIR/rockyou.txt.gz" ]]; then
+        gunzip "$WORDLIST_DIR/rockyou.txt.gz"
+        msg "rockyou.txt installed"
+    else
+        warn "Could not download rockyou.txt automatically"
+        warn "Download manually: https://github.com/danielmiessler/SecLists/blob/master/Passwords/Leaked-Databases/rockyou.txt.tar.gz"
+    fi
+else
+    msg "rockyou.txt already present, skipping"
+fi
+
+# SecLists
+if [[ ! -d "$WORDLIST_DIR/seclists" ]]; then
+    msg "Cloning SecLists (this may take a while)..."
+    git clone --depth 1 https://github.com/danielmiessler/SecLists.git "$WORDLIST_DIR/seclists"
+    msg "SecLists installed at $WORDLIST_DIR/seclists"
+else
+    msg "SecLists already present, skipping"
+fi
+
+chmod -R o+r "$WORDLIST_DIR"
+
+# ------------------------------------------------------------------------------
+# Phase 9: Shell Configuration (Zsh + Oh My Zsh)
 # ------------------------------------------------------------------------------
 
 msg "Configuring Zsh..."
@@ -302,6 +429,11 @@ alias ports='netstat -tulanp'
 alias listening='netstat -tlnp'
 alias myip='curl -s ifconfig.me'
 
+# Wordlists
+export WORDLISTS="/usr/share/wordlists"
+export SECLISTS="/usr/share/wordlists/seclists"
+export ROCKYOU="/usr/share/wordlists/rockyou.txt"
+
 # Functions
 b64e() { echo -n "$1" | base64; }
 b64d() { echo -n "$1" | base64 -d; }
@@ -313,7 +445,7 @@ ZSHRC
 fi
 
 # ------------------------------------------------------------------------------
-# Phase 7: i3 Configuration
+# Phase 10: i3 Configuration
 # ------------------------------------------------------------------------------
 
 msg "Configuring i3..."
@@ -441,7 +573,7 @@ I3CONFIG
 chown -R "$REAL_USER:$REAL_USER" "$I3_DIR"
 
 # ------------------------------------------------------------------------------
-# Phase 8: Polybar Configuration
+# Phase 11: Polybar Configuration
 # ------------------------------------------------------------------------------
 
 msg "Configuring Polybar..."
@@ -574,7 +706,7 @@ chmod +x "$POLYBAR_DIR/launch.sh"
 chown -R "$REAL_USER:$REAL_USER" "$POLYBAR_DIR"
 
 # ------------------------------------------------------------------------------
-# Phase 9: Kitty Configuration
+# Phase 12: Kitty Configuration
 # ------------------------------------------------------------------------------
 
 msg "Configuring Kitty..."
@@ -605,7 +737,7 @@ update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /
 update-alternatives --set x-terminal-emulator /usr/bin/kitty
 
 # ------------------------------------------------------------------------------
-# Phase 10: System PATH Configuration
+# Phase 13: System PATH Configuration
 # ------------------------------------------------------------------------------
 
 msg "Configuring system PATH..."
@@ -644,40 +776,72 @@ check binwalk
 check smbclient
 check hashcat
 check proxychains4
+check enum4linux
 check i3
 check polybar
 check zsh
 check kitty
+check neo4j
 
 echo ""
 echo "Security Environment (/opt/security-tools-venv):"
 if [[ -d "$SECURITY_VENV" ]]; then
     echo -e "${GREEN}✓${NC} Virtual environment exists"
     source "$SECURITY_VENV/bin/activate"
-    python -c "import impacket" 2>/dev/null && echo -e "${GREEN}✓${NC} impacket" || echo -e "${RED}✗${NC} impacket"
-    command -v certipy &>/dev/null && echo -e "${GREEN}✓${NC} certipy-ad" || echo -e "${RED}✗${NC} certipy-ad"
-    [[ -f "$SECURITY_VENV/responder/Responder.py" ]] && echo -e "${GREEN}✓${NC} responder" || echo -e "${RED}✗${NC} responder"
+    python -c "import impacket" 2>/dev/null   && echo -e "${GREEN}✓${NC} impacket"      || echo -e "${RED}✗${NC} impacket"
+    python -c "import aioquic" 2>/dev/null    && echo -e "${GREEN}✓${NC} aioquic"       || echo -e "${RED}✗${NC} aioquic"
+    python -c "import mitm6" 2>/dev/null      && echo -e "${GREEN}✓${NC} mitm6"         || echo -e "${RED}✗${NC} mitm6"
+    python -c "import bloodhound" 2>/dev/null && echo -e "${GREEN}✓${NC} bloodhound-python" || echo -e "${RED}✗${NC} bloodhound-python"
+    command -v certipy &>/dev/null            && echo -e "${GREEN}✓${NC} certipy-ad"    || echo -e "${RED}✗${NC} certipy-ad"
+    [[ -f "$SECURITY_VENV/responder/Responder.py" ]] \
+                                              && echo -e "${GREEN}✓${NC} responder"     || echo -e "${RED}✗${NC} responder"
     deactivate
 fi
 
 echo ""
 echo "User Tools (pipx):"
-run_as_user "$REAL_USER" "command -v netexec" &>/dev/null && echo -e "${GREEN}✓${NC} netexec" || echo -e "${YELLOW}*${NC} netexec (may need: pipx install git+https://github.com/Pennyw0rth/NetExec)"
-run_as_user "$REAL_USER" "command -v secretsdump.py" &>/dev/null && echo -e "${GREEN}✓${NC} impacket (pipx)" || echo -e "${GREEN}✓${NC} impacket (using venv)"
+run_as_user "$REAL_USER" "command -v netexec" &>/dev/null \
+    && echo -e "${GREEN}✓${NC} netexec" \
+    || echo -e "${YELLOW}*${NC} netexec (may need: pipx install git+https://github.com/Pennyw0rth/NetExec)"
+
+echo ""
+echo "BloodHound:"
+[[ -f "$BLOODHOUND_DIR/BloodHound.AppImage" ]] \
+    && echo -e "${GREEN}✓${NC} BloodHound GUI ($BLOODHOUND_DIR/BloodHound.AppImage)" \
+    || echo -e "${RED}✗${NC} BloodHound GUI not found"
+command -v neo4j &>/dev/null \
+    && echo -e "${GREEN}✓${NC} Neo4j (credentials: neo4j / bloodhound)" \
+    || echo -e "${RED}✗${NC} Neo4j"
+
+echo ""
+echo "Wordlists:"
+[[ -f "$WORDLIST_DIR/rockyou.txt" ]]    && echo -e "${GREEN}✓${NC} rockyou.txt"  || echo -e "${RED}✗${NC} rockyou.txt"
+[[ -d "$WORDLIST_DIR/seclists" ]]       && echo -e "${GREEN}✓${NC} SecLists"     || echo -e "${RED}✗${NC} SecLists"
 
 echo ""
 echo "=============================================="
 echo "  Quick Reference"
 echo "=============================================="
 echo ""
-echo "Activate security env:  source /opt/security-tools-venv/bin/activate"
-echo "                   or:  activate-security"
+echo "Activate security env:  activate-security"
 echo ""
-echo "Run tools:"
-echo "  responder -I eth0"
-echo "  certipy-venv find -u user@domain"
-echo "  netexec smb <target>"
-echo "  pchains nmap <target>"
+echo "NTLM relay attack:"
+echo "  responder -I eth0 -wv"
+echo "  ntlmrelayx.py -tf targets.txt -smb2support"
+echo ""
+echo "IPv6 + NTLM relay:"
+echo "  mitm6 -d domain.local"
+echo "  ntlmrelayx.py -6 -tf targets.txt -wh wpad.domain.local"
+echo ""
+echo "BloodHound collection:"
+echo "  bloodhound-python -u user -p pass -d domain.local -ns dc-ip -c All"
+echo ""
+echo "BloodHound GUI:"
+echo "  sudo systemctl start neo4j"
+echo "  bloodhound-gui"
+echo "  (connect: bolt://localhost:7687, neo4j / bloodhound)"
+echo ""
+echo "Wordlists: \$ROCKYOU, \$SECLISTS"
 echo ""
 echo "IMPORTANT: Start a new terminal session for PATH changes."
 echo ""
