@@ -32,9 +32,11 @@ readonly NC='\033[0m'
 # Helper Functions
 # ------------------------------------------------------------------------------
 
+# warn/err go to stderr so they don't get captured by $(...) command
+# substitutions (e.g. get_real_user) and so they're visible on the error path.
 msg()     { echo -e "${GREEN}[+]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[*]${NC} $1"; }
-err()     { echo -e "${RED}[!]${NC} $1"; }
+warn()    { echo -e "${YELLOW}[*]${NC} $1" >&2; }
+err()     { echo -e "${RED}[!]${NC} $1" >&2; }
 
 get_real_user() {
     if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
@@ -111,8 +113,15 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-REAL_USER=$(get_real_user)
+# get_real_user's `exit 1` only exits the command-substitution subshell, so we
+# must check its status and exit the parent ourselves (no `set -e` to do it).
+REAL_USER=$(get_real_user) || exit 1
 USER_HOME=$(get_user_home "$REAL_USER")
+
+if [[ -z "$REAL_USER" || -z "$USER_HOME" ]]; then
+    err "Could not determine the target user or home directory"
+    exit 1
+fi
 
 msg "Installing security tools for user: $REAL_USER"
 msg "User home directory: $USER_HOME"
@@ -127,7 +136,7 @@ apt-get update || true
 # Ensure the 'universe' component is enabled — many of these tools (enum4linux,
 # dnsrecon, nbtscan, polybar...) live there, and a minimal install may not have
 # it. add-apt-repository is provided by software-properties-common.
-if ! apt-cache policy 2>/dev/null | grep -q ' universe'; then
+if ! apt-cache policy 2>/dev/null | grep -q universe; then
     msg "Enabling 'universe' repository component..."
     apt-get install -y software-properties-common || true
     add-apt-repository -y universe 2>/dev/null || warn "Could not enable universe automatically"
@@ -293,26 +302,29 @@ msg "Installing Responder..."
 if [[ -d /tmp/Responder ]]; then
     rm -rf /tmp/Responder
 fi
-git clone --depth 1 https://github.com/lgandx/Responder.git /tmp/Responder
 
-run_as_user "$REAL_USER" "
-    source '$SECURITY_VENV/bin/activate'
-    pip install -r /tmp/Responder/requirements.txt
-    deactivate
-"
+if git clone --depth 1 https://github.com/lgandx/Responder.git /tmp/Responder; then
+    run_as_user "$REAL_USER" "
+        source '$SECURITY_VENV/bin/activate'
+        pip install -r /tmp/Responder/requirements.txt
+        deactivate
+    "
 
-cp -r /tmp/Responder "$SECURITY_VENV/responder"
-chown -R "$REAL_USER:$REAL_USER" "$SECURITY_VENV/responder"
-chmod +x "$SECURITY_VENV/responder/Responder.py"
-rm -rf /tmp/Responder
+    cp -r /tmp/Responder "$SECURITY_VENV/responder"
+    chown -R "$REAL_USER:$REAL_USER" "$SECURITY_VENV/responder"
+    chmod +x "$SECURITY_VENV/responder/Responder.py"
+    rm -rf /tmp/Responder
 
-# Disable SMB and HTTP servers in Responder config (avoid conflicts with
-# ntlmrelayx which needs to handle those protocols itself)
-RESPONDER_CONF="$SECURITY_VENV/responder/Responder.conf"
-if [[ -f "$RESPONDER_CONF" ]]; then
-    sed -i 's/^SMB = On/SMB = Off/' "$RESPONDER_CONF"
-    sed -i 's/^HTTP = On/HTTP = Off/' "$RESPONDER_CONF"
-    msg "Responder: disabled SMB and HTTP servers in config"
+    # Disable SMB and HTTP servers in Responder config (avoid conflicts with
+    # ntlmrelayx which needs to handle those protocols itself)
+    RESPONDER_CONF="$SECURITY_VENV/responder/Responder.conf"
+    if [[ -f "$RESPONDER_CONF" ]]; then
+        sed -i 's/^SMB = On/SMB = Off/' "$RESPONDER_CONF"
+        sed -i 's/^HTTP = On/HTTP = Off/' "$RESPONDER_CONF"
+        msg "Responder: disabled SMB and HTTP servers in config"
+    fi
+else
+    warn "Responder clone failed; skipping (install manually from https://github.com/lgandx/Responder)"
 fi
 
 # ------------------------------------------------------------------------------
@@ -469,7 +481,9 @@ else
     msg "SecLists already present, skipping"
 fi
 
-chmod -R o+r "$WORDLIST_DIR"
+# o+rX (capital X) adds execute only to directories, so other users can both
+# read the wordlists and traverse SecLists' subdirectories.
+chmod -R o+rX "$WORDLIST_DIR"
 
 # ------------------------------------------------------------------------------
 # Phase 9: Shell Configuration (Zsh + Oh My Zsh)
@@ -482,8 +496,11 @@ chsh -s /usr/bin/zsh "$REAL_USER" || warn "Could not change default shell to zsh
 # Install Oh My Zsh for user
 if [[ ! -d "$USER_HOME/.oh-my-zsh" ]]; then
     msg "Installing Oh My Zsh..."
+    # KEEP_ZSHRC=no lets the installer write its default .zshrc template, which
+    # the sed/append steps below depend on (they target robbyrussell/plugins=(git)).
+    # Any pre-existing .zshrc is preserved by the installer as .zshrc.pre-oh-my-zsh.
     run_as_user "$REAL_USER" '
-        export RUNZSH=no CHSH=no KEEP_ZSHRC=yes
+        export RUNZSH=no CHSH=no KEEP_ZSHRC=no
         sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
     ' || {
         warn "Oh My Zsh install script failed, trying direct clone..."
@@ -508,8 +525,9 @@ if [[ -f "$USER_HOME/.zshrc" ]]; then
 
 # --- Security Tools Configuration ---
 
-# PATH
-export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/security-tools-venv/bin:/snap/bin:$PATH"
+# PATH — venv/bin is placed LAST so the security tools' entrypoints are on PATH
+# without the venv shadowing the system python3/pip in interactive shells.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/snap/bin:$PATH:/opt/security-tools-venv/bin"
 
 # Aliases - Security
 alias nse='ls /usr/share/nmap/scripts/ | grep'
@@ -551,7 +569,7 @@ I3_DIR="$USER_HOME/.config/i3"
 mkdir -p "$I3_DIR"
 
 cat > "$I3_DIR/config" << 'I3CONFIG'
-# i3 config file (v4)
+# i3 config file (v5)
 
 set $mod Mod1
 
@@ -842,8 +860,8 @@ fi
 msg "Configuring system PATH..."
 
 cat > /etc/profile.d/security-tools.sh << 'PROFILE'
-# Security Tools PATH
-export PATH="/snap/bin:$HOME/.local/bin:$HOME/.cargo/bin:/opt/security-tools-venv/bin:$PATH"
+# Security Tools PATH (venv/bin last so it doesn't shadow system python3/pip)
+export PATH="/snap/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH:/opt/security-tools-venv/bin"
 PROFILE
 
 chmod +x /etc/profile.d/security-tools.sh
