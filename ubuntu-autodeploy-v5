@@ -1,0 +1,901 @@
+#!/bin/bash
+
+# Ubuntu Security Tools Installation Script (v5)
+# Installs: nmap, ncat, binwalk, impacket, netexec, certipy, responder,
+#           smbclient, hashcat, i3, polybar, zsh, oh-my-zsh, kitty,
+#           proxychains, obsidian, java, dnstools, bloodhound, mitm6,
+#           enum4linux, wordlists
+#
+# v5 changes: an installer should keep going when an optional component fails
+# rather than aborting the whole run. We drop `set -e` (keep -u and pipefail),
+# make every fallible step tolerant, install apt packages resiliently, and fix
+# several hard-failures from v4 (missing keyrings dir, setcap on a symlink,
+# rockyou gunzip, openjdk-8-jre, BloodHound asset type, redundant pipx pip).
+
+set -uo pipefail
+
+# ------------------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------------------
+
+readonly SECURITY_VENV="/opt/security-tools-venv"
+readonly WORDLIST_DIR="/usr/share/wordlists"
+readonly BLOODHOUND_DIR="/opt/BloodHound"
+
+# Colors
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly NC='\033[0m'
+
+# ------------------------------------------------------------------------------
+# Helper Functions
+# ------------------------------------------------------------------------------
+
+msg()     { echo -e "${GREEN}[+]${NC} $1"; }
+warn()    { echo -e "${YELLOW}[*]${NC} $1"; }
+err()     { echo -e "${RED}[!]${NC} $1"; }
+
+get_real_user() {
+    if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
+        echo "$SUDO_USER"
+    else
+        err "This script must be run with sudo, not as root directly"
+        err "Usage: sudo $0"
+        exit 1
+    fi
+}
+
+get_user_home() {
+    getent passwd "$1" | cut -d: -f6
+}
+
+run_as_user() {
+    local user="$1"
+    shift
+    su - "$user" -c "$*"
+}
+
+# Install a list of apt packages, falling back to one-by-one so that a single
+# unavailable package (e.g. on a release where it was renamed/removed) doesn't
+# take down the entire batch.
+apt_install() {
+    if apt-get install -y "$@"; then
+        return 0
+    fi
+    warn "Bulk apt install failed; retrying packages individually..."
+    for pkg in "$@"; do
+        apt-get install -y "$pkg" || warn "Could not install '$pkg' (skipping)"
+    done
+}
+
+# ------------------------------------------------------------------------------
+# Pre-flight Checks
+# ------------------------------------------------------------------------------
+
+if [[ $EUID -ne 0 ]]; then
+    err "This script must be run with sudo"
+    exit 1
+fi
+
+REAL_USER=$(get_real_user)
+USER_HOME=$(get_user_home "$REAL_USER")
+
+msg "Installing security tools for user: $REAL_USER"
+msg "User home directory: $USER_HOME"
+
+# ------------------------------------------------------------------------------
+# Phase 1: System Packages (apt)
+# ------------------------------------------------------------------------------
+
+msg "Updating package lists..."
+apt-get update
+
+msg "Installing system packages..."
+apt_install \
+    build-essential \
+    curl \
+    wget \
+    git \
+    jq \
+    unzip \
+    ca-certificates \
+    gnupg \
+    \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    python3-setuptools \
+    pipx \
+    \
+    nmap \
+    ncat \
+    iputils-ping \
+    binwalk \
+    smbclient \
+    hashcat \
+    proxychains4 \
+    net-tools \
+    dnsutils \
+    dnsrecon \
+    nbtscan \
+    adcli \
+    enum4linux \
+    \
+    default-jre \
+    \
+    i3 \
+    i3status \
+    i3lock \
+    xss-lock \
+    dmenu \
+    polybar \
+    \
+    zsh \
+    kitty \
+    tmux \
+    \
+    libssl-dev \
+    libffi-dev \
+    libpcap-dev \
+    libgmp3-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    zlib1g-dev \
+    \
+    fonts-powerline \
+    fonts-font-awesome \
+    \
+    ocl-icd-libopencl1 \
+    opencl-headers \
+    libcap2-bin
+
+# Legacy Java 8 — only available on some releases, so keep it best-effort.
+# default-jre (installed above) is sufficient for Neo4j/BloodHound.
+apt-get install -y openjdk-8-jre 2>/dev/null \
+    || warn "openjdk-8-jre unavailable on this release (default-jre is installed instead)"
+
+# Install certipy from apt if available
+apt-get install -y python3-certipy 2>/dev/null || warn "python3-certipy not in apt, will install via pip"
+
+# Install ldapdomaindump from apt
+apt-get install -y python3-ldapdomaindump 2>/dev/null || true
+
+# ------------------------------------------------------------------------------
+# Phase 2: Neo4j (for BloodHound)
+# ------------------------------------------------------------------------------
+
+msg "Installing Neo4j..."
+if ! command -v neo4j &>/dev/null; then
+    # /etc/apt/keyrings does not exist by default on Ubuntu — create it first.
+    mkdir -p /etc/apt/keyrings
+    wget -O - https://debian.neo4j.com/neotechnology.gpg.key | gpg --dearmor -o /etc/apt/keyrings/neo4j.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/neo4j.gpg] https://debian.neo4j.com stable latest' \
+        > /etc/apt/sources.list.d/neo4j.list
+    apt-get update
+    apt-get install -y neo4j || warn "Neo4j install failed"
+fi
+
+# Enable + set initial password (best-effort; systemctl is absent under WSL/containers).
+# neo4j 5.x uses `neo4j-admin dbms set-initial-password`, 4.x uses `neo4j-admin set-initial-password`.
+systemctl enable neo4j 2>/dev/null || warn "Could not enable neo4j service (no systemd?)"
+neo4j-admin dbms set-initial-password bloodhound 2>/dev/null \
+    || neo4j-admin set-initial-password bloodhound 2>/dev/null \
+    || warn "Could not set Neo4j initial password automatically"
+msg "Neo4j default credentials: neo4j / bloodhound"
+
+# ------------------------------------------------------------------------------
+# Phase 3: Snap Packages
+# ------------------------------------------------------------------------------
+
+msg "Setting up snap..."
+if ! command -v snap &>/dev/null; then
+    apt-get install -y snapd || warn "snapd install failed"
+    systemctl enable --now snapd.socket 2>/dev/null || warn "Could not start snapd.socket (no systemd?)"
+    ln -sf /var/lib/snapd/snap /snap
+    sleep 2
+fi
+
+msg "Installing Obsidian..."
+snap install obsidian --classic || warn "Obsidian snap install failed"
+
+# ------------------------------------------------------------------------------
+# Phase 4: Security Tools Virtual Environment (as user)
+# ------------------------------------------------------------------------------
+
+msg "Creating security tools virtual environment..."
+
+# Create venv directory with correct ownership from the start
+mkdir -p "$SECURITY_VENV"
+chown "$REAL_USER:$REAL_USER" "$SECURITY_VENV"
+
+# Create and populate venv as the actual user.
+# --copies makes bin/python3 a real binary instead of a symlink, which is
+# required for setcap below (setcap refuses to operate on a symlink).
+run_as_user "$REAL_USER" "
+    python3 -m venv --copies '$SECURITY_VENV'
+    source '$SECURITY_VENV/bin/activate'
+
+    pip install --upgrade pip
+    pip install wheel
+
+    # Core security tools
+    pip install impacket
+    pip install certipy-ad
+    pip install netifaces
+    pip install aioquic
+
+    # AD enumeration and attack tools
+    pip install bloodhound
+    pip install mitm6
+
+    deactivate
+"
+
+# Allow venv python to bind privileged ports and use raw sockets (needed for
+# ntlmrelayx port 445/80 and mitm6 raw IPv6 sockets) without requiring sudo.
+# setcap needs a real file: resolve through any remaining symlink just in case.
+VENV_PYTHON=$(readlink -f "$SECURITY_VENV/bin/python3")
+if setcap 'cap_net_bind_service=+eip cap_net_raw=+eip' "$VENV_PYTHON" 2>/dev/null; then
+    msg "Set capabilities on venv python3 (ntlmrelayx/mitm6 can run without sudo)"
+else
+    warn "Could not set capabilities on $VENV_PYTHON (run privileged tools with sudo)"
+fi
+
+# Install Responder
+msg "Installing Responder..."
+if [[ -d /tmp/Responder ]]; then
+    rm -rf /tmp/Responder
+fi
+git clone --depth 1 https://github.com/lgandx/Responder.git /tmp/Responder
+
+run_as_user "$REAL_USER" "
+    source '$SECURITY_VENV/bin/activate'
+    pip install -r /tmp/Responder/requirements.txt
+    deactivate
+"
+
+cp -r /tmp/Responder "$SECURITY_VENV/responder"
+chown -R "$REAL_USER:$REAL_USER" "$SECURITY_VENV/responder"
+chmod +x "$SECURITY_VENV/responder/Responder.py"
+rm -rf /tmp/Responder
+
+# Disable SMB and HTTP servers in Responder config (avoid conflicts with
+# ntlmrelayx which needs to handle those protocols itself)
+RESPONDER_CONF="$SECURITY_VENV/responder/Responder.conf"
+if [[ -f "$RESPONDER_CONF" ]]; then
+    sed -i 's/^SMB = On/SMB = Off/' "$RESPONDER_CONF"
+    sed -i 's/^HTTP = On/HTTP = Off/' "$RESPONDER_CONF"
+    msg "Responder: disabled SMB and HTTP servers in config"
+fi
+
+# ------------------------------------------------------------------------------
+# Phase 5: User Tools (pipx)
+# ------------------------------------------------------------------------------
+
+msg "Setting up pipx tools for $REAL_USER..."
+
+# Install Rust first (required for NetExec)
+if ! run_as_user "$REAL_USER" "command -v rustc" &>/dev/null; then
+    msg "Installing Rust..."
+    run_as_user "$REAL_USER" "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+fi
+
+# Setup pipx and install tools
+run_as_user "$REAL_USER" "
+    export PATH=\"\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH\"
+
+    # pipx is installed via apt in Phase 1; just make sure its bin dir is on PATH.
+    pipx ensurepath || python3 -m pipx ensurepath || true
+
+    pipx install impacket || true
+    pipx install 'git+https://github.com/Pennyw0rth/NetExec' || echo 'NetExec install failed - may need manual install'
+"
+
+# ------------------------------------------------------------------------------
+# Phase 6: BloodHound GUI
+# ------------------------------------------------------------------------------
+
+msg "Installing BloodHound GUI..."
+mkdir -p "$BLOODHOUND_DIR"
+
+# Legacy BloodHound ships the Linux GUI as a .zip asset (not an AppImage).
+BH_ZIP_URL=$(curl -s https://api.github.com/repos/BloodHoundAD/BloodHound/releases/latest \
+    | jq -r '.assets[] | select(.name | test("BloodHound-linux-x64.*\\.zip")) | .browser_download_url' \
+    | head -1)
+
+if [[ -n "$BH_ZIP_URL" ]]; then
+    if wget -q --show-progress -O /tmp/bloodhound-linux.zip "$BH_ZIP_URL" \
+        && unzip -o -q /tmp/bloodhound-linux.zip -d "$BLOODHOUND_DIR"; then
+        rm -f /tmp/bloodhound-linux.zip
+
+        # Find the BloodHound executable inside the extracted directory.
+        BH_BIN=$(find "$BLOODHOUND_DIR" -maxdepth 2 -type f -name 'BloodHound' | head -1)
+        if [[ -n "$BH_BIN" ]]; then
+            chmod +x "$BH_BIN"
+            chown -R "$REAL_USER:$REAL_USER" "$BLOODHOUND_DIR"
+
+            # Create system-wide launcher pointing at the extracted binary.
+            cat > /usr/local/bin/bloodhound-gui << EOF
+#!/bin/bash
+exec "$BH_BIN" --no-sandbox "\$@"
+EOF
+            chmod +x /usr/local/bin/bloodhound-gui
+            msg "BloodHound GUI installed ($BH_BIN)"
+        else
+            warn "BloodHound archive extracted but no 'BloodHound' binary found"
+        fi
+    else
+        warn "Failed to download/extract BloodHound GUI"
+    fi
+else
+    warn "Could not fetch BloodHound release URL - download manually from:"
+    warn "https://github.com/BloodHoundAD/BloodHound/releases/latest"
+fi
+
+# ------------------------------------------------------------------------------
+# Phase 7: Wrapper Scripts
+# ------------------------------------------------------------------------------
+
+msg "Creating wrapper scripts..."
+
+# Responder wrapper
+cat > /usr/local/bin/responder << 'EOF'
+#!/bin/bash
+source /opt/security-tools-venv/bin/activate
+cd /opt/security-tools-venv/responder
+exec python3 Responder.py "$@"
+EOF
+chmod +x /usr/local/bin/responder
+
+# Certipy wrapper (venv version)
+cat > /usr/local/bin/certipy-venv << 'EOF'
+#!/bin/bash
+source /opt/security-tools-venv/bin/activate
+exec certipy "$@"
+EOF
+chmod +x /usr/local/bin/certipy-venv
+
+# mitm6 wrapper
+cat > /usr/local/bin/mitm6 << 'EOF'
+#!/bin/bash
+source /opt/security-tools-venv/bin/activate
+exec mitm6 "$@"
+EOF
+chmod +x /usr/local/bin/mitm6
+
+# bloodhound-python wrapper
+cat > /usr/local/bin/bloodhound-python << 'EOF'
+#!/bin/bash
+source /opt/security-tools-venv/bin/activate
+exec bloodhound-python "$@"
+EOF
+chmod +x /usr/local/bin/bloodhound-python
+
+# Create symlinks for pipx tools if they exist
+USER_LOCAL_BIN="$USER_HOME/.local/bin"
+if [[ -d "$USER_LOCAL_BIN" ]]; then
+    for tool in netexec nxc; do
+        if [[ -f "$USER_LOCAL_BIN/$tool" ]]; then
+            ln -sf "$USER_LOCAL_BIN/$tool" "/usr/local/bin/$tool"
+            msg "Created symlink for $tool"
+        fi
+    done
+fi
+
+# ------------------------------------------------------------------------------
+# Phase 8: Wordlists
+# ------------------------------------------------------------------------------
+
+msg "Setting up wordlists..."
+mkdir -p "$WORDLIST_DIR"
+
+# rockyou
+if [[ ! -f "$WORDLIST_DIR/rockyou.txt" ]]; then
+    msg "Downloading rockyou.txt..."
+    # Primary source serves the file as plain text (already uncompressed).
+    if wget -q --show-progress \
+        -O "$WORDLIST_DIR/rockyou.txt" \
+        "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt" \
+        2>/dev/null && [[ -s "$WORDLIST_DIR/rockyou.txt" ]]; then
+        msg "rockyou.txt installed"
+    # Fallback source is bzip2-compressed.
+    elif wget -q --show-progress \
+        -O "$WORDLIST_DIR/rockyou.txt.bz2" \
+        "https://download.g0tmi1k.com/wordlists/large/rockyou.txt.bz2" \
+        2>/dev/null && [[ -s "$WORDLIST_DIR/rockyou.txt.bz2" ]]; then
+        bunzip2 -f "$WORDLIST_DIR/rockyou.txt.bz2" && msg "rockyou.txt installed"
+    else
+        rm -f "$WORDLIST_DIR/rockyou.txt" "$WORDLIST_DIR/rockyou.txt.bz2"
+        warn "Could not download rockyou.txt automatically"
+        warn "Download manually: https://github.com/danielmiessler/SecLists/blob/master/Passwords/Leaked-Databases/rockyou.txt.tar.gz"
+    fi
+else
+    msg "rockyou.txt already present, skipping"
+fi
+
+# SecLists
+if [[ ! -d "$WORDLIST_DIR/seclists" ]]; then
+    msg "Cloning SecLists (this may take a while)..."
+    git clone --depth 1 https://github.com/danielmiessler/SecLists.git "$WORDLIST_DIR/seclists"
+    msg "SecLists installed at $WORDLIST_DIR/seclists"
+else
+    msg "SecLists already present, skipping"
+fi
+
+chmod -R o+r "$WORDLIST_DIR"
+
+# ------------------------------------------------------------------------------
+# Phase 9: Shell Configuration (Zsh + Oh My Zsh)
+# ------------------------------------------------------------------------------
+
+msg "Configuring Zsh..."
+
+chsh -s /usr/bin/zsh "$REAL_USER" || warn "Could not change default shell to zsh for $REAL_USER"
+
+# Install Oh My Zsh for user
+if [[ ! -d "$USER_HOME/.oh-my-zsh" ]]; then
+    msg "Installing Oh My Zsh..."
+    run_as_user "$REAL_USER" '
+        export RUNZSH=no CHSH=no KEEP_ZSHRC=yes
+        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+    ' || {
+        warn "Oh My Zsh install script failed, trying direct clone..."
+        git clone --depth 1 https://github.com/ohmyzsh/ohmyzsh.git "$USER_HOME/.oh-my-zsh"
+        cp "$USER_HOME/.oh-my-zsh/templates/zshrc.zsh-template" "$USER_HOME/.zshrc"
+        chown -R "$REAL_USER:$REAL_USER" "$USER_HOME/.oh-my-zsh" "$USER_HOME/.zshrc"
+    }
+fi
+
+# Configure .zshrc
+if [[ -f "$USER_HOME/.zshrc" ]]; then
+    cp "$USER_HOME/.zshrc" "$USER_HOME/.zshrc.backup"
+
+    # Set theme
+    sed -i 's/ZSH_THEME="robbyrussell"/ZSH_THEME="agnoster"/' "$USER_HOME/.zshrc"
+
+    # Set plugins
+    sed -i 's/plugins=(git)/plugins=(git docker python pip ssh-agent sudo tmux colored-man-pages command-not-found z)/' "$USER_HOME/.zshrc"
+
+    # Add custom configuration
+    cat >> "$USER_HOME/.zshrc" << 'ZSHRC'
+
+# --- Security Tools Configuration ---
+
+# PATH
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/security-tools-venv/bin:/snap/bin:$PATH"
+
+# Aliases - Security
+alias nse='ls /usr/share/nmap/scripts/ | grep'
+alias serve='python3 -m http.server'
+alias activate-security='source /opt/security-tools-venv/bin/activate'
+alias sec-env='source /opt/security-tools-venv/bin/activate'
+
+# Aliases - Proxychains
+alias pchains='proxychains4'
+alias pc='proxychains4'
+
+# Aliases - Network
+alias ports='netstat -tulanp'
+alias listening='netstat -tlnp'
+alias myip='curl -s ifconfig.me'
+
+# Wordlists
+export WORDLISTS="/usr/share/wordlists"
+export SECLISTS="/usr/share/wordlists/seclists"
+export ROCKYOU="/usr/share/wordlists/rockyou.txt"
+
+# Functions
+b64e() { echo -n "$1" | base64; }
+b64d() { echo -n "$1" | base64 -d; }
+urlencode() { python3 -c "import urllib.parse; print(urllib.parse.quote('$1'))"; }
+urldecode() { python3 -c "import urllib.parse; print(urllib.parse.unquote('$1'))"; }
+ZSHRC
+
+    chown "$REAL_USER:$REAL_USER" "$USER_HOME/.zshrc"
+fi
+
+# ------------------------------------------------------------------------------
+# Phase 10: i3 Configuration
+# ------------------------------------------------------------------------------
+
+msg "Configuring i3..."
+
+I3_DIR="$USER_HOME/.config/i3"
+mkdir -p "$I3_DIR"
+
+cat > "$I3_DIR/config" << 'I3CONFIG'
+# i3 config file (v4)
+
+set $mod Mod1
+
+font pango:monospace 8
+
+# Terminal
+bindsym $mod+Return exec kitty
+
+# Kill window
+bindsym $mod+Shift+q kill
+
+# Launcher
+bindsym $mod+d exec dmenu_run
+
+# Focus
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+
+# Move
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+j move down
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+l move right
+bindsym $mod+Shift+Left move left
+bindsym $mod+Shift+Down move down
+bindsym $mod+Shift+Up move up
+bindsym $mod+Shift+Right move right
+
+# Split
+bindsym $mod+b split h
+bindsym $mod+v split v
+
+# Fullscreen
+bindsym $mod+f fullscreen toggle
+
+# Layout
+bindsym $mod+s layout stacking
+bindsym $mod+w layout tabbed
+bindsym $mod+e layout toggle split
+
+# Floating
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+space focus mode_toggle
+
+# Parent container
+bindsym $mod+a focus parent
+
+# Workspaces
+set $ws1 "1"
+set $ws2 "2"
+set $ws3 "3"
+set $ws4 "4"
+set $ws5 "5"
+set $ws6 "6"
+set $ws7 "7"
+set $ws8 "8"
+set $ws9 "9"
+set $ws10 "10"
+
+bindsym $mod+1 workspace number $ws1
+bindsym $mod+2 workspace number $ws2
+bindsym $mod+3 workspace number $ws3
+bindsym $mod+4 workspace number $ws4
+bindsym $mod+5 workspace number $ws5
+bindsym $mod+6 workspace number $ws6
+bindsym $mod+7 workspace number $ws7
+bindsym $mod+8 workspace number $ws8
+bindsym $mod+9 workspace number $ws9
+bindsym $mod+0 workspace number $ws10
+
+bindsym $mod+Shift+1 move container to workspace number $ws1
+bindsym $mod+Shift+2 move container to workspace number $ws2
+bindsym $mod+Shift+3 move container to workspace number $ws3
+bindsym $mod+Shift+4 move container to workspace number $ws4
+bindsym $mod+Shift+5 move container to workspace number $ws5
+bindsym $mod+Shift+6 move container to workspace number $ws6
+bindsym $mod+Shift+7 move container to workspace number $ws7
+bindsym $mod+Shift+8 move container to workspace number $ws8
+bindsym $mod+Shift+9 move container to workspace number $ws9
+bindsym $mod+Shift+0 move container to workspace number $ws10
+
+# Reload/Restart
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+r restart
+bindsym $mod+Shift+e exec "i3-nagbar -t warning -m 'Exit i3?' -B 'Yes' 'i3-msg exit'"
+
+# Resize mode
+mode "resize" {
+    bindsym h resize shrink width 10 px or 10 ppt
+    bindsym j resize grow height 10 px or 10 ppt
+    bindsym k resize shrink height 10 px or 10 ppt
+    bindsym l resize grow width 10 px or 10 ppt
+    bindsym Left resize shrink width 10 px or 10 ppt
+    bindsym Down resize grow height 10 px or 10 ppt
+    bindsym Up resize shrink height 10 px or 10 ppt
+    bindsym Right resize grow width 10 px or 10 ppt
+    bindsym Return mode "default"
+    bindsym Escape mode "default"
+    bindsym $mod+r mode "default"
+}
+bindsym $mod+r mode "resize"
+
+# Polybar
+exec_always --no-startup-id $HOME/.config/polybar/launch.sh
+
+# Lock screen
+bindsym $mod+Escape exec i3lock -c 282a2e
+I3CONFIG
+
+chown -R "$REAL_USER:$REAL_USER" "$I3_DIR"
+
+# ------------------------------------------------------------------------------
+# Phase 11: Polybar Configuration
+# ------------------------------------------------------------------------------
+
+msg "Configuring Polybar..."
+
+POLYBAR_DIR="$USER_HOME/.config/polybar"
+mkdir -p "$POLYBAR_DIR"
+
+cat > "$POLYBAR_DIR/config.ini" << 'POLYBAR'
+[colors]
+background = #282A2E
+background-alt = #373B41
+foreground = #C5C8C6
+primary = #F0C674
+secondary = #8ABEB7
+alert = #A54242
+disabled = #707880
+
+[bar/main]
+width = 100%
+height = 24pt
+radius = 0
+background = ${colors.background}
+foreground = ${colors.foreground}
+line-size = 3pt
+border-size = 0
+padding-left = 0
+padding-right = 1
+module-margin = 1
+separator = |
+separator-foreground = ${colors.disabled}
+font-0 = monospace;2
+font-1 = Font Awesome 6 Free:pixelsize=12;2
+font-2 = Font Awesome 6 Free Solid:pixelsize=12;2
+font-3 = Font Awesome 6 Brands:pixelsize=12;2
+modules-left = i3 xwindow
+modules-center = date
+modules-right = network cpu memory battery
+cursor-click = pointer
+cursor-scroll = ns-resize
+enable-ipc = true
+
+[module/i3]
+type = internal/i3
+pin-workspaces = true
+show-urgent = true
+strip-wsnumbers = true
+index-sort = true
+format = <label-state> <label-mode>
+label-focused = %index%
+label-focused-background = ${colors.background-alt}
+label-focused-underline = ${colors.primary}
+label-focused-padding = 1
+label-unfocused = %index%
+label-unfocused-padding = 1
+label-visible = %index%
+label-visible-underline = ${colors.secondary}
+label-visible-padding = 1
+label-urgent = %index%
+label-urgent-background = ${colors.alert}
+label-urgent-padding = 1
+
+[module/xwindow]
+type = internal/xwindow
+label = %title:0:60:...%
+
+[module/cpu]
+type = internal/cpu
+interval = 2
+format-prefix = "CPU "
+format-prefix-foreground = ${colors.primary}
+label = %percentage:2%%
+
+[module/memory]
+type = internal/memory
+interval = 2
+format-prefix = "MEM "
+format-prefix-foreground = ${colors.primary}
+label = %percentage_used:2%%
+
+[module/network]
+type = internal/network
+interface-type = wired
+interval = 3.0
+format-connected = <label-connected>
+format-connected-prefix = "NET "
+format-connected-prefix-foreground = ${colors.primary}
+label-connected = %ifname% %local_ip%
+format-disconnected = <label-disconnected>
+label-disconnected = disconnected
+label-disconnected-foreground = ${colors.disabled}
+
+[module/battery]
+type = internal/battery
+battery = BAT0
+adapter = AC
+full-at = 98
+format-charging = <label-charging>
+format-charging-prefix = "BAT+ "
+format-charging-prefix-foreground = ${colors.secondary}
+label-charging = %percentage%%
+format-discharging = <label-discharging>
+format-discharging-prefix = "BAT "
+format-discharging-prefix-foreground = ${colors.primary}
+label-discharging = %percentage%%
+format-full-prefix = "FULL "
+format-full-prefix-foreground = ${colors.secondary}
+label-full = %percentage%%
+
+[module/date]
+type = internal/date
+interval = 1
+date = %Y-%m-%d %H:%M:%S
+date-alt = %A, %B %d, %Y %H:%M:%S
+label = %date%
+label-foreground = ${colors.primary}
+
+[settings]
+screenchange-reload = true
+pseudo-transparency = false
+POLYBAR
+
+cat > "$POLYBAR_DIR/launch.sh" << 'LAUNCH'
+#!/bin/bash
+killall -q polybar
+while pgrep -u $UID -x polybar >/dev/null; do sleep 1; done
+polybar main &
+LAUNCH
+
+chmod +x "$POLYBAR_DIR/launch.sh"
+chown -R "$REAL_USER:$REAL_USER" "$POLYBAR_DIR"
+
+# ------------------------------------------------------------------------------
+# Phase 12: Kitty Configuration
+# ------------------------------------------------------------------------------
+
+msg "Configuring Kitty..."
+
+KITTY_DIR="$USER_HOME/.config/kitty"
+mkdir -p "$KITTY_DIR"
+
+cat > "$KITTY_DIR/kitty.conf" << 'KITTY'
+font_family      monospace
+font_size        11.0
+shell            /usr/bin/zsh
+shell_integration enabled
+enable_audio_bell no
+background_opacity 0.95
+background       #1e1e1e
+scrollback_lines 10000
+open_url_with    default
+detect_urls      yes
+repaint_delay    10
+input_delay      3
+sync_to_monitor  yes
+KITTY
+
+chown -R "$REAL_USER:$REAL_USER" "$KITTY_DIR"
+
+# Set kitty as default terminal
+if command -v kitty &>/dev/null; then
+    update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/bin/kitty 50 || true
+    update-alternatives --set x-terminal-emulator /usr/bin/kitty || true
+fi
+
+# ------------------------------------------------------------------------------
+# Phase 13: System PATH Configuration
+# ------------------------------------------------------------------------------
+
+msg "Configuring system PATH..."
+
+cat > /etc/profile.d/security-tools.sh << 'PROFILE'
+# Security Tools PATH
+export PATH="/snap/bin:$HOME/.local/bin:$HOME/.cargo/bin:/opt/security-tools-venv/bin:$PATH"
+PROFILE
+
+chmod +x /etc/profile.d/security-tools.sh
+
+# ------------------------------------------------------------------------------
+# Verification
+# ------------------------------------------------------------------------------
+
+echo ""
+echo "=============================================="
+echo "  Installation Complete"
+echo "=============================================="
+echo ""
+echo "User: $REAL_USER"
+echo ""
+
+check() {
+    if command -v "$1" &>/dev/null; then
+        echo -e "${GREEN}✓${NC} $1"
+    else
+        echo -e "${RED}✗${NC} $1"
+    fi
+}
+
+echo "System Tools:"
+check nmap
+check ncat
+check binwalk
+check smbclient
+check hashcat
+check proxychains4
+check enum4linux
+check i3
+check polybar
+check zsh
+check kitty
+check neo4j
+
+echo ""
+echo "Security Environment (/opt/security-tools-venv):"
+if [[ -d "$SECURITY_VENV" ]]; then
+    echo -e "${GREEN}✓${NC} Virtual environment exists"
+    source "$SECURITY_VENV/bin/activate"
+    python -c "import impacket" 2>/dev/null   && echo -e "${GREEN}✓${NC} impacket"      || echo -e "${RED}✗${NC} impacket"
+    python -c "import aioquic" 2>/dev/null    && echo -e "${GREEN}✓${NC} aioquic"       || echo -e "${RED}✗${NC} aioquic"
+    python -c "import mitm6" 2>/dev/null      && echo -e "${GREEN}✓${NC} mitm6"         || echo -e "${RED}✗${NC} mitm6"
+    python -c "import bloodhound" 2>/dev/null && echo -e "${GREEN}✓${NC} bloodhound-python" || echo -e "${RED}✗${NC} bloodhound-python"
+    command -v certipy &>/dev/null            && echo -e "${GREEN}✓${NC} certipy-ad"    || echo -e "${RED}✗${NC} certipy-ad"
+    [[ -f "$SECURITY_VENV/responder/Responder.py" ]] \
+                                              && echo -e "${GREEN}✓${NC} responder"     || echo -e "${RED}✗${NC} responder"
+    deactivate
+fi
+
+echo ""
+echo "User Tools (pipx):"
+run_as_user "$REAL_USER" "command -v netexec" &>/dev/null \
+    && echo -e "${GREEN}✓${NC} netexec" \
+    || echo -e "${YELLOW}*${NC} netexec (may need: pipx install git+https://github.com/Pennyw0rth/NetExec)"
+
+echo ""
+echo "BloodHound:"
+[[ -x /usr/local/bin/bloodhound-gui ]] \
+    && echo -e "${GREEN}✓${NC} BloodHound GUI (launcher: bloodhound-gui)" \
+    || echo -e "${RED}✗${NC} BloodHound GUI not found"
+command -v neo4j &>/dev/null \
+    && echo -e "${GREEN}✓${NC} Neo4j (credentials: neo4j / bloodhound)" \
+    || echo -e "${RED}✗${NC} Neo4j"
+
+echo ""
+echo "Wordlists:"
+[[ -f "$WORDLIST_DIR/rockyou.txt" ]]    && echo -e "${GREEN}✓${NC} rockyou.txt"  || echo -e "${RED}✗${NC} rockyou.txt"
+[[ -d "$WORDLIST_DIR/seclists" ]]       && echo -e "${GREEN}✓${NC} SecLists"     || echo -e "${RED}✗${NC} SecLists"
+
+echo ""
+echo "=============================================="
+echo "  Quick Reference"
+echo "=============================================="
+echo ""
+echo "Activate security env:  activate-security"
+echo ""
+echo "NTLM relay attack:"
+echo "  responder -I eth0 -wv"
+echo "  ntlmrelayx.py -tf targets.txt -smb2support"
+echo ""
+echo "IPv6 + NTLM relay:"
+echo "  mitm6 -d domain.local"
+echo "  ntlmrelayx.py -6 -tf targets.txt -wh wpad.domain.local"
+echo ""
+echo "BloodHound collection:"
+echo "  bloodhound-python -u user -p pass -d domain.local -ns dc-ip -c All"
+echo ""
+echo "BloodHound GUI:"
+echo "  sudo systemctl start neo4j"
+echo "  bloodhound-gui"
+echo "  (connect: bolt://localhost:7687, neo4j / bloodhound)"
+echo ""
+echo "Wordlists: \$ROCKYOU, \$SECLISTS"
+echo ""
+echo "IMPORTANT: Start a new terminal session for PATH changes."
+echo ""
