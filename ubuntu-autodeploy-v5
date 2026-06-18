@@ -3,7 +3,7 @@
 # Ubuntu Security Tools Installation Script (v5)
 # Installs: nmap, ncat, binwalk, impacket, netexec, certipy, responder,
 #           smbclient, hashcat, i3, polybar, zsh, oh-my-zsh, kitty,
-#           proxychains, obsidian, java, dnstools, bloodhound, mitm6,
+#           proxychains, java, dnstools, bloodhound, mitm6,
 #           enum4linux, wordlists
 #
 # v5 changes: an installer should keep going when an optional component fails
@@ -238,21 +238,6 @@ neo4j-admin dbms set-initial-password bloodhound 2>/dev/null \
     || neo4j-admin set-initial-password bloodhound 2>/dev/null \
     || warn "Could not set Neo4j initial password automatically"
 msg "Neo4j default credentials: neo4j / bloodhound"
-
-# ------------------------------------------------------------------------------
-# Phase 3: Snap Packages
-# ------------------------------------------------------------------------------
-
-msg "Setting up snap..."
-if ! command -v snap &>/dev/null; then
-    apt-get install -y snapd || warn "snapd install failed"
-    systemctl enable --now snapd.socket 2>/dev/null || warn "Could not start snapd.socket (no systemd?)"
-    ln -sf /var/lib/snapd/snap /snap
-    sleep 2
-fi
-
-msg "Installing Obsidian..."
-snap install obsidian --classic || warn "Obsidian snap install failed"
 
 # ------------------------------------------------------------------------------
 # Phase 4: Security Tools Virtual Environment (as user)
