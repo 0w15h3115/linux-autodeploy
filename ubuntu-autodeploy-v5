@@ -56,17 +56,50 @@ run_as_user() {
     su - "$user" -c "$*"
 }
 
+# True if apt has an installation candidate for the package on THIS release.
+# Lets us skip packages that were renamed/removed in a newer Ubuntu instead of
+# letting one missing name abort everything.
+apt_available() {
+    local cand
+    cand=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2}')
+    [[ -n "$cand" && "$cand" != "(none)" ]]
+}
+
 # Install a list of apt packages, falling back to one-by-one so that a single
-# unavailable package (e.g. on a release where it was renamed/removed) doesn't
-# take down the entire batch.
+# unavailable package doesn't take down the entire batch. In the fallback we
+# probe availability first so a removed/renamed package is a clean skip.
 apt_install() {
     if apt-get install -y "$@"; then
         return 0
     fi
     warn "Bulk apt install failed; retrying packages individually..."
     for pkg in "$@"; do
-        apt-get install -y "$pkg" || warn "Could not install '$pkg' (skipping)"
+        if apt_available "$pkg"; then
+            apt-get install -y "$pkg" || warn "Could not install '$pkg' (skipping)"
+        else
+            warn "Package '$pkg' not available on this release (skipping)"
+        fi
     done
+}
+
+# Install the FIRST package from the list that this release actually offers.
+# Use for version-floating names so you never have to pin one, e.g.:
+#   apt_install_first "Java runtime" default-jre openjdk-21-jre openjdk-17-jre
+# default-jre is a meta-package that always tracks the current default JDK, so
+# putting it first means Ubuntu picks the right version for you automatically.
+apt_install_first() {
+    local label="$1"; shift
+    local pkg
+    for pkg in "$@"; do
+        if apt_available "$pkg"; then
+            if apt-get install -y "$pkg"; then
+                msg "$label: installed '$pkg'"
+                return 0
+            fi
+        fi
+    done
+    warn "$label: none of [$*] are available on this release (skipping)"
+    return 1
 }
 
 # ------------------------------------------------------------------------------
@@ -89,7 +122,17 @@ msg "User home directory: $USER_HOME"
 # ------------------------------------------------------------------------------
 
 msg "Updating package lists..."
-apt-get update
+apt-get update || true
+
+# Ensure the 'universe' component is enabled — many of these tools (enum4linux,
+# dnsrecon, nbtscan, polybar...) live there, and a minimal install may not have
+# it. add-apt-repository is provided by software-properties-common.
+if ! apt-cache policy 2>/dev/null | grep -q ' universe'; then
+    msg "Enabling 'universe' repository component..."
+    apt-get install -y software-properties-common || true
+    add-apt-repository -y universe 2>/dev/null || warn "Could not enable universe automatically"
+    apt-get update || true
+fi
 
 msg "Installing system packages..."
 apt_install \
@@ -123,8 +166,6 @@ apt_install \
     adcli \
     enum4linux \
     \
-    default-jre \
-    \
     i3 \
     i3status \
     i3lock \
@@ -151,10 +192,14 @@ apt_install \
     opencl-headers \
     libcap2-bin
 
-# Legacy Java 8 — only available on some releases, so keep it best-effort.
-# default-jre (installed above) is sufficient for Neo4j/BloodHound.
-apt-get install -y openjdk-8-jre 2>/dev/null \
-    || warn "openjdk-8-jre unavailable on this release (default-jre is installed instead)"
+# Java runtime — version-independent. default-jre tracks the current default
+# JDK on every release; the explicit openjdk-* names are only fallbacks in case
+# the meta-package is ever unavailable. No rewrite needed when Ubuntu bumps Java.
+apt_install_first "Java runtime" \
+    default-jre \
+    openjdk-21-jre \
+    openjdk-17-jre \
+    openjdk-11-jre
 
 # Install certipy from apt if available
 apt-get install -y python3-certipy 2>/dev/null || warn "python3-certipy not in apt, will install via pip"
