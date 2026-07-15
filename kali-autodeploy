@@ -172,6 +172,7 @@ apt_install \
     ufw \
     \
     nmap \
+    ncat \
     binwalk \
     smbclient \
     hashcat \
@@ -220,7 +221,14 @@ else
             apt-get update || true
             apt-get install -y tailscale || warn "Tailscale apt install failed"
         else
-            warn "Could not add Tailscale repo; trying official install script..."
+            warn "Could not add Tailscale repo (will try the official install script)"
+        fi
+
+        # Fall back to the official installer if the apt path didn't land the
+        # binary — covers both a failed repo add and a repo that resolved but
+        # had no installable 'tailscale' candidate on this release.
+        if ! command -v tailscale &>/dev/null; then
+            warn "Trying Tailscale's official install script..."
             curl -fsSL https://tailscale.com/install.sh | sh || warn "Tailscale install failed"
         fi
     fi
