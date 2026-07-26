@@ -1,4 +1,4 @@
-# linux-autodeploy
+# Tooling deployment scripts
 
 [![CI](https://github.com/owlshells/linux-autodeploy/actions/workflows/ci.yml/badge.svg)](https://github.com/owlshells/linux-autodeploy/actions/workflows/ci.yml)
 [![Kali container suite](https://github.com/owlshells/linux-autodeploy/actions/workflows/container.yml/badge.svg)](https://github.com/owlshells/linux-autodeploy/actions/workflows/container.yml)
