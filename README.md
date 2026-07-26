@@ -164,8 +164,8 @@ See `TMUX-TAILSCALE-CHEATSHEET.md`.
 ## test-with-tails (Tails OS) — beta
 
 Stocks a Tails live session with the tools it doesn't ship: Nmap (and Ncat),
-Impacket, NetExec, Burp Suite Community, proxychains, neovim, build-essential, an
-Apache server, and a staged copy of Mythic. The awkward part is that every fetch has
+Impacket, NetExec, Sliver, Burp Suite Community, proxychains, neovim,
+build-essential, an Apache server, and a staged copy of Mythic. The awkward part is that every fetch has
 to go through Tor, as the `amnesia` user — dealing with those quirks, and the
 permissions problems that come with them, is the reason the script exists.
 
@@ -196,9 +196,28 @@ sudo ./test-with-tails
   hole in your persec. It is started but not enabled (nothing survives the session
   anyway); `sudo systemctl stop apache2` if you don't need it.
 
-**Mythic replaces Sliver, and it is staged rather than installed.** Sliver was a
-single static binary; Mythic is a Docker stack, and two things about Tails get in
-its way. The Docker daemon runs as root, and root's traffic is not torified — the
+**Two C2s, and only one of them actually runs here.**
+
+`sliver-server` installs to `/usr/local/bin` — one static Go binary, ~270 MB over
+Tor, arch-suffixed asset (`sliver-server_linux-amd64`). It works offline once it's
+down: first run unpacks its embedded toolchain rather than fetching one, so implant
+compilation needs no network at all. Two limits worth knowing before you rely on it:
+
+- **`torify` does nothing for Sliver itself.** torsocks is `LD_PRELOAD` over libc,
+  and Go makes raw syscalls straight past it — so Sliver's traffic goes direct and
+  the Tails firewall drops it. Anything that reaches out (`armory install`) needs
+  Go's own proxy support instead:
+
+  ```bash
+  HTTPS_PROXY=socks5://127.0.0.1:9050 sliver-server
+  ```
+
+- **Implants can't call back to a Tails box** without an onion service you set up by
+  hand — and Tails regenerates `torrc` every boot, so that's per-session work. As a
+  local implant builder and workbench it's fine; as a callback server it isn't.
+
+**Mythic is staged, not installed.** It's a Docker stack, and two things about Tails
+get in its way. The Docker daemon runs as root, and root's traffic is not torified — the
 Tails firewall drops it, so image pulls fail, and so does `make`, which pulls its
 builder image from `ghcr.io`. And the images run to several GB against a filesystem
 that is RAM. So the script installs the daemon and clones the repo:
@@ -210,8 +229,9 @@ sudo ./mythic-cli start         # brings the stack up
 
 Both of those need egress the Tails firewall doesn't give the daemon, so bringing
 Mythic up is a decision you make with a plan for that, not something the script does
-behind your back. If you just want a C2 on a live session with no Docker, a single
-static implant server is the better shape — that was Sliver's one advantage here.
+behind your back. Sliver is the one to reach for on a live session; the better use
+of Mythic from Tails is as an *operator*, pointing a browser at a Mythic you already
+run elsewhere (`https://<server>:7443`), which needs no Docker here at all.
 
 NetExec installs as **`nxc`** in `/usr/local/bin` — that's the command name, not
 `netexec`. Its Linux build comes from a GitHub release asset, and because the newest

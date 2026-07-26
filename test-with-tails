@@ -39,9 +39,34 @@ echo "Installing build-essential..."
 sudo apt install build-essential -y
 # Working
 
-# Install Mythic C2 (replaces Sliver)
-# Mythic is not a single binary the way Sliver was -- it is a Docker stack, and
-# two things about Tails get in its way:
+# Install Sliver C2
+# The URL this used to carry -- releases/latest/download/sliver-server_linux --
+# has 404'd since at least v1.6.8: the asset takes an arch suffix now. wget -O
+# still created the file, so an empty sliver-server got marked executable and
+# moved into PATH, and nothing said a word. Name the arch, and check the file
+# has bytes in it before installing it.
+#
+# torify does nothing for Sliver's own traffic, only for this download: torsocks
+# is LD_PRELOAD over libc and Go makes raw syscalls straight past it, so Sliver
+# reaches out directly and the Tails firewall drops it. Go does honour
+# HTTPS_PROXY, which is the way round it -- see README.
+echo "Installing Sliver..."
+SLIVER_ARCH=$(dpkg --print-architecture)
+sudo -u amnesia torify wget "https://github.com/BishopFox/sliver/releases/latest/download/sliver-server_linux-${SLIVER_ARCH}" -O /tmp/sliver-server
+if [ -s /tmp/sliver-server ]; then
+    chmod +x /tmp/sliver-server
+    sudo mv /tmp/sliver-server /usr/local/bin/sliver-server
+    echo "  installed as sliver-server"
+else
+    rm -f /tmp/sliver-server
+    echo "  Sliver: no release asset for $SLIVER_ARCH, skipping"
+    echo "  https://github.com/BishopFox/sliver/releases"
+fi
+# Working -- ~270 MB over Tor, runs offline once down
+
+# Install Mythic C2 (the other C2; staged only)
+# Unlike Sliver above, Mythic is not a single binary -- it is a Docker stack,
+# and two things about Tails get in its way:
 #   * the Docker daemon runs as root, and root's traffic is not torified, so
 #     the Tails firewall drops it. Image pulls fail, and so does `make`, which
 #     pulls its builder image from ghcr.io.
