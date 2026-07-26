@@ -46,7 +46,7 @@ Options:
 -h, --help
 ```
 
-Phases: `base tools desktop harden i3 polybar kitty shell wordlists`
+Phases: `base tools desktop harden i3 polybar kitty shell dots wordlists`
 
 Re-running is always safe — every phase is idempotent, so a run that dies partway
 can be resumed by running it again (or narrowed with `--only`). A full transcript
@@ -100,6 +100,45 @@ not be reachable from the LAN until you open the port:
 sudo ufw allow 8000/tcp     # or the fw-open alias
 ```
 
+### The `dots` phase
+
+Clones the private [`owlshells/dots`](https://github.com/owlshells/dots) shell kit
+into `~/dots` and runs its `install.sh`, which symlinks `~/.bash_aliases` and adds a
+guarded hook to `~/.zshrc`. It then seeds the command-recall index from any logs
+already on the box, so the shell is useful on the first login rather than the tenth.
+
+Because the repo is private and a freshly imaged box has no credentials, the phase
+tries each transport it might plausibly have and **skips rather than fails** if none
+work — a shell kit is never a reason to redo an install:
+
+| Order | Transport | Needs |
+|-------|-----------|-------|
+| 1 | `DOTS_TOKEN` | `sudo DOTS_TOKEN=<pat> ./kali-deploy-... ` |
+| 2 | SSH | a key already on the box, agent or on disk |
+| 3 | `gh` | `gh auth login` run beforehand |
+
+A token is passed as a per-invocation `http.extraHeader`, never embedded in the
+remote URL — a URL credential gets persisted into `.git/config` and echoed back in
+git's error output, and this script's transcript goes to `/var/log`. `git` is also
+pinned to `BatchMode`/`GIT_TERMINAL_PROMPT=0` so it can never sit waiting for input
+on a box nobody is standing in front of.
+
+Finish it later with `sudo ./kali-deploy-<physical|remote> --only dots`.
+
+Set `DOTS_REPO=owner/name` to point the phase at a different kit.
+
+The zshrc block the `shell` phase writes defines `serve`, `ports`, `listening`,
+`myip`, `WORDLISTS`/`SECLISTS` and the encoders **only when dots is absent**. dots
+provides richer versions, and `alias serve` would otherwise permanently shadow its
+`serve()` function, since zsh resolves aliases before functions. `extip` is kept
+unguarded as its own name, because "what the internet sees" is a different question
+from dots' local-interface `myip`.
+
+On the remote script `install.sh` is invoked with `--no-tmux`: that box's
+`~/.tmux.conf` is the headless SSH one written by the `tmux` phase, which suits it
+better than the repo's — and leaving it a real file stops `write_file`'s `cat >`
+from writing into the dots checkout through a symlink.
+
 ### After it finishes
 
 Some things can only be checked on the hardware, and the script prints them at the
@@ -136,7 +175,7 @@ sudo ./kali-deploy-remote
 It takes the same flags as the physical script — `--dry-run`, `--skip`, `--only`,
 `--list-phases`, `--print-packages`, `--help`.
 
-Phases: `base tools tailscale ssh firewall tmux shell wordlists`
+Phases: `base tools tailscale ssh firewall tmux shell dots wordlists`
 
 Environment knobs: `TS_AUTHKEY`, `TS_ADVERTISE_TAGS`, `SSH_PUBKEY`, `SKIP_TAILSCALE=1`,
 `SKIP_UFW=1`. The last two are equivalent to `--skip tailscale` / `--skip firewall` and

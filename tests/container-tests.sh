@@ -58,8 +58,13 @@ install_test_prereqs() {
     # The base kali-rolling image is minimal; the tests need utilities a real
     # Kali install would already have. ufw so the firewall lockout guard is
     # exercised for real rather than short-circuiting on "ufw not installed".
+    # git and sudo are what the dots phase runs on: without them T10 exercises
+    # the "git is not installed" short circuit instead of the credential logic,
+    # which is the part that actually has to degrade gracefully. Both are in the
+    # scripts' own package lists, so installing them here costs the package
+    # checks nothing -- those already ran, against a pristine image.
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        findutils coreutils gawk sed grep procps iproute2 tmux ufw >/dev/null 2>&1
+        findutils coreutils gawk sed grep procps iproute2 tmux ufw git sudo >/dev/null 2>&1
     # i3 itself, so T4 can validate the generated config with `i3 -C`. A syntax
     # error there means a desktop that won't start at the greeter, which is
     # precisely the failure this suite exists to catch before it reaches hardware.
@@ -198,6 +203,88 @@ t_idempotent_shell() {
         || fail "zshrc block appears $n times (expected 1)"
 }
 
+# T10 -- the dots phase. The container has no GitHub credentials, which is
+# exactly the state of a freshly imaged box, so the degraded path is the one
+# that gets exercised here -- and it is the one that matters. A private repo the
+# box cannot reach must never be the reason a reimage has to be redone.
+t_dots_phase() {
+    head_ "T10: dots phase degrades instead of failing"
+    local marker="$1"
+
+    "$SCRIPT" --list-phases 2>/dev/null | grep -qw dots \
+        && pass "dots is a registered phase" \
+        || fail "dots missing from --list-phases"
+
+    rm -rf "$USER_HOME/dots"
+    if as_sudo --only dots >/tmp/dots.log 2>&1; then
+        pass "dots phase exits 0 with no credentials"
+    else
+        fail "dots phase exited non-zero with no credentials"
+        tail -15 /tmp/dots.log | sed 's/^/    /'
+    fi
+
+    [[ ! -e "$USER_HOME/dots" ]] \
+        && pass "no half-made checkout left behind on failure" \
+        || fail "$USER_HOME/dots exists after a credential-less run"
+
+    # Every exit from this phase must name the command that completes it later.
+    if grep -q 'only dots' /tmp/dots.log; then
+        pass "tells you how to finish it later"
+    else
+        fail "gave no recovery instructions"
+        sed 's/^/    /' /tmp/dots.log | tail -10
+    fi
+
+    # A token must never reach the transcript: this script's output is teed to
+    # /var/log, and a leaked PAT there outlives the engagement.
+    rm -rf "$USER_HOME/dots"
+    DOTS_TOKEN="ghp_SUPERSECRETCANARY123" DOTS_REPO="owlshells/definitely-not-a-repo" \
+        as_sudo --only dots >/tmp/dotstok.log 2>&1
+    if grep -q 'SUPERSECRETCANARY' /tmp/dotstok.log; then
+        fail "DOTS_TOKEN leaked into the transcript"
+        grep -n 'SUPERSECRETCANARY' /tmp/dotstok.log | head -3 | sed 's/^/    /'
+    else
+        pass "DOTS_TOKEN never appears in output"
+    fi
+    [[ ! -e "$USER_HOME/dots" ]] \
+        && pass "failed token clone leaves no checkout" \
+        || fail "checkout left behind after a failed token clone"
+
+    # An existing non-git directory is someone else's; do not touch it.
+    mkdir -p "$USER_HOME/dots"; echo keep > "$USER_HOME/dots/mine.txt"
+    chown -R "$TEST_USER:$TEST_USER" "$USER_HOME/dots"
+    as_sudo --only dots >/tmp/dots3.log 2>&1
+    [[ -f "$USER_HOME/dots/mine.txt" ]] \
+        && pass "a non-git ~/dots is left alone" \
+        || fail "clobbered a pre-existing non-git ~/dots"
+    rm -rf "$USER_HOME/dots"
+
+    # The zshrc block must not define anything dots also defines, except behind
+    # the not-installed guard -- `alias serve` would otherwise permanently shadow
+    # dots' serve(), since zsh resolves aliases before functions.
+    local blk
+    blk=$(awk "/${marker}/,/<<< /" "$USER_HOME/.zshrc" 2>/dev/null)
+    if [[ -z "$blk" ]]; then
+        fail "no zshrc block to inspect (run the shell phase first)"
+        return
+    fi
+    grep -q 'dots/shell/zshrc' <<<"$blk" \
+        && pass "zshrc block guards its duplicates on dots being absent" \
+        || fail "zshrc block has no dots guard"
+
+    local dup unguarded=0
+    for dup in "alias serve=" "alias ports=" "alias listening=" "alias myip=" \
+               "export WORDLISTS=" "export SECLISTS=" "b64e()" "urlencode()"; do
+        # Every occurrence must sit inside the `if [[ ! -r ...dots... ]]` block.
+        if grep -qF "$dup" <<<"$blk" && \
+           ! awk '/if \[\[ ! -r .*dots\/shell\/zshrc/,/^fi$/' <<<"$blk" | grep -qF "$dup"; then
+            fail "'$dup' is defined outside the dots guard"
+            unguarded=1
+        fi
+    done
+    (( unguarded )) || pass "every dots-overlapping definition sits inside the guard"
+}
+
 # T8 -- bad input is rejected, and --help stays clean.
 t_bad_input() {
     head_ "T8: bad input is rejected"
@@ -297,6 +384,7 @@ else
 fi
 
 t_idempotent_shell '>>> kali-deploy-physical >>>'
+t_dots_phase '>>> kali-deploy-physical >>>'
 
 as_sudo --only i3 --only polybar --only kitty >/tmp/rerun.log 2>&1 \
     && pass "config phases re-run cleanly" \
@@ -428,6 +516,7 @@ else
 fi
 
 t_idempotent_shell '>>> kali-deploy-remote >>>'
+t_dots_phase '>>> kali-deploy-remote >>>'
 
 # ------------------------------------------------------------------------------
 head_ "R5: backups survive a re-run"

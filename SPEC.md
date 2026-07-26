@@ -115,6 +115,38 @@ The `agnoster` theme went with it. It needs powerline glyphs in the terminal you
 are connecting *from*, which on a headless box is not a thing the deploy script
 can install.
 
+### A credential the box does not have is a skip, not a failure
+
+The `dots` phase pulls a **private** repo. A freshly imaged machine has no SSH
+key and no `gh` token, so the common case is that it cannot authenticate at all.
+It tries `DOTS_TOKEN`, then SSH, then `gh`, and when none work it warns, prints
+the one command that finishes the job later, and lets the run continue. The
+governing requirement applies here as everywhere: nothing optional gets to be
+the reason an install is redone.
+
+Two supporting rules fall out of it:
+
+- **git must never block on a prompt.** `GIT_TERMINAL_PROMPT=0` and
+  `BatchMode=yes` are set for every git call in the phase. Without them an
+  unknown host key or a private HTTPS URL waits forever for input, on a box
+  nobody is watching — the failure mode the whole spec exists to avoid.
+- **A token never goes in a URL.** It is passed as a per-invocation
+  `http.extraHeader`. A URL-embedded credential is persisted into `.git/config`
+  by `clone` and repeated in git's error output, and this script's transcript is
+  written to `/var/log`. The suite asserts a canary token never reaches the log.
+
+### Never define what another layer already owns
+
+When both the deploy script and a shell kit define `serve`, the loser is
+whichever the shell resolves second — and in zsh an alias beats a function, so
+`alias serve='python3 -m http.server'` would permanently shadow dots' richer
+`serve()`. The overlapping definitions are therefore wrapped in a
+"dots is not installed" guard rather than deleted outright, because the dots
+phase is allowed to fail and the box must be fully equipped either way.
+
+Where the two genuinely mean different things, they get different names:
+`myip` is local interfaces, `extip` is what the internet sees.
+
 ### Say what could not be verified
 
 Some things are only observable on real hardware — whether i3 actually starts,

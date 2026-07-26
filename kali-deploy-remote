@@ -29,7 +29,7 @@
 #                      print every binary the verification pass ticks
 #   -h, --help         this message
 #
-# Phases: base tools tailscale ssh firewall tmux shell wordlists
+# Phases: base tools tailscale ssh firewall tmux shell dots wordlists
 #
 # Environment knobs (all optional):
 #   TS_AUTHKEY          reusable Tailscale auth key -> unattended join. If unset,
@@ -40,6 +40,10 @@
 #                       (e.g. "ssh-ed25519 AAAA... you@host").
 #   SKIP_TAILSCALE=1    same as --skip tailscale (kept for older invocations).
 #   SKIP_UFW=1          same as --skip firewall.
+#   DOTS_TOKEN          GitHub token for the private dots repo. Without it the
+#                       dots phase falls back to an SSH key, then to `gh auth`,
+#                       then skips (the rest of the run is unaffected).
+#   DOTS_REPO           owner/name of the shell kit (default owlshells/dots).
 #
 # Design notes: an installer should keep going when an optional piece fails
 # rather than aborting. We keep -u and pipefail but NOT -e, make every fallible
@@ -112,7 +116,7 @@ PKGS=(
     wordlists
 )
 
-readonly ALL_PHASES=(base tools tailscale ssh firewall tmux shell wordlists)
+readonly ALL_PHASES=(base tools tailscale ssh firewall tmux shell dots wordlists)
 
 # Binaries the verification pass ticks at the end of a run. BINARY names, not
 # package names -- certipy-ad ships /usr/bin/certipy-ad, while /usr/bin/certipy
@@ -686,24 +690,18 @@ $ZSHRC_MARKER
 
 export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH"
 
-# Wordlists
-export WORDLISTS="/usr/share/wordlists"
-export SECLISTS="/usr/share/seclists"
 export ROCKYOU="/usr/share/wordlists/rockyou.txt"
 
 # Security
 alias nse='ls /usr/share/nmap/scripts/ | grep'
-alias serve='python3 -m http.server'
 
 # Proxychains
 alias pchains='proxychains4'
 alias pc='proxychains4'
 
 # Network
-alias ports='ss -tulanp'
-alias listening='ss -tlnp'
-alias myip='curl -s ifconfig.me'
 alias tsip='tailscale ip -4'          # this box's tailnet IP
+alias extip='curl -s ifconfig.me'     # what the internet sees; \`myip\` is local
 
 # tmux (multi-window over SSH)
 alias ta='tmux attach -t'             # ta main
@@ -711,12 +709,28 @@ alias tn='tmux new -s'                # tn main
 alias tl='tmux ls'
 alias tk='tmux kill-session -t'       # tk main
 
-# Encoders. Arguments are passed as argv, never interpolated into the Python
+# Everything in this block duplicates something the dots shell kit provides, so
+# define it only when dots is absent. The box ends up fully equipped either way,
+# and nothing collides when dots is there.
+#
+# It has to be a guard rather than a deletion because the dots phase is allowed
+# to fail (see below) -- and \`alias serve\` in particular would otherwise shadow
+# dots' serve() permanently, since zsh resolves aliases before functions.
+#
+# Encoder arguments are passed as argv, never interpolated into the Python
 # source -- otherwise a quote in the input is a syntax error at best.
-b64e() { echo -n "\$1" | base64; }
-b64d() { echo -n "\$1" | base64 -d; }
-urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "\$1"; }
-urldecode() { python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "\$1"; }
+if [[ ! -r "\$HOME/dots/shell/zshrc" ]]; then
+    export WORDLISTS="/usr/share/wordlists"
+    export SECLISTS="/usr/share/seclists"
+    alias serve='python3 -m http.server'
+    alias ports='ss -tulanp'
+    alias listening='ss -tlnp'
+    alias myip="ip -4 -o addr show | awk '{print \\\$2, \\\$4}' | grep -v '^lo '"
+    b64e() { echo -n "\$1" | base64; }
+    b64d() { echo -n "\$1" | base64 -d; }
+    urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "\$1"; }
+    urldecode() { python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "\$1"; }
+fi
 
 # Auto-attach a persistent tmux session on interactive SSH login, so a dropped
 # connection never kills your work -- you reconnect straight back into it.
@@ -731,6 +745,110 @@ $ZSHRC_END_MARKER
 ZSHRC_BLOCK
         chown "$REAL_USER:$REAL_USER" "$ZSHRC"
         msg "appended config block to $ZSHRC"
+    fi
+fi
+
+# ------------------------------------------------------------------------------
+# Phase: dots -- the personal shell kit, cloned and left to install itself
+# ------------------------------------------------------------------------------
+
+if should_run dots; then
+    phase "Phase: dots"
+
+    DOTS_SLUG="${DOTS_REPO:-owlshells/dots}"
+    DOTS_DIR="$USER_HOME/dots"
+
+    # git must never block on a prompt. Without these, a host key it has not
+    # seen or a private repo over HTTPS sits waiting for input that is not
+    # coming, and on a reimage that means walking back to the machine.
+    DOTS_SSH_OPTS="ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+
+    as_user() {
+        sudo -u "$REAL_USER" -H env GIT_TERMINAL_PROMPT=0 \
+            GIT_SSH_COMMAND="$DOTS_SSH_OPTS" "$@"
+    }
+
+    # The repo is private, and a freshly imaged box has neither an SSH key nor a
+    # gh token. Try each transport it might plausibly have, most deliberate
+    # first, and treat "none" as a skip: a missing shell kit is an
+    # inconvenience, not a reason to redo an install.
+    dots_transport() {
+        [[ -n "${DOTS_TOKEN:-}" ]] && { echo token; return 0; }
+        as_user git ls-remote "git@github.com:${DOTS_SLUG}.git" &>/dev/null \
+            && { echo ssh; return 0; }
+        as_user gh auth token &>/dev/null && { echo gh; return 0; }
+        return 1
+    }
+
+    # A token goes in a per-invocation Authorization header, never in the URL.
+    # A URL-embedded credential is persisted into .git/config by clone and gets
+    # echoed back in git's own error messages -- and this script's transcript
+    # lands in /var/log. This way the stored remote is the clean HTTPS one and
+    # there is nothing to scrub afterwards.
+    dots_clone() {
+        local tok hdr
+        case "$1" in
+            ssh)
+                as_user git clone --quiet "git@github.com:${DOTS_SLUG}.git" "$DOTS_DIR"
+                ;;
+            token|gh)
+                if [[ "$1" == token ]]; then tok="$DOTS_TOKEN"; else tok=$(as_user gh auth token); fi
+                hdr=$(printf 'x-access-token:%s' "$tok" | base64 -w0)
+                as_user git -c "http.extraHeader=Authorization: Basic $hdr" \
+                    clone --quiet "https://github.com/${DOTS_SLUG}.git" "$DOTS_DIR"
+                ;;
+        esac
+    }
+
+    dots_run_install() {
+        if [[ ! -x "$DOTS_DIR/install.sh" ]]; then
+            warn "no install.sh in $DOTS_DIR -- clone looks wrong, leaving it"
+            return 1
+        fi
+        chown -R "$REAL_USER:$REAL_USER" "$DOTS_DIR" 2>/dev/null
+        # --no-tmux: this box's ~/.tmux.conf is the headless SSH one written by
+        # the tmux phase above, which fits a remote box better than the repo's.
+        # It also stops write_file's `cat >` landing inside the dots checkout.
+        if as_user "$DOTS_DIR/install.sh" --no-tmux >/dev/null; then
+            msg "dots installed (~/.bash_aliases, ~/.zshrc hook)"
+        else
+            warn "dots install.sh reported a problem -- shell kit may be partial"
+            return 1
+        fi
+        # Give recall something to work with on the very first shell.
+        [[ -x "$DOTS_DIR/tools/backfill-index.sh" ]] \
+            && as_user "$DOTS_DIR/tools/backfill-index.sh" >/dev/null 2>&1
+        return 0
+    }
+
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} clone/update ${DOTS_SLUG} into ${DOTS_DIR}, then run its install.sh"
+    elif ! command -v git &>/dev/null; then
+        # Only reachable via --only dots on a bare box; the base phase installs
+        # git long before this normally runs. Still worth a way forward.
+        warn "git is not installed -- skipping dots"
+        warn "  install it and retry: sudo $0 --only dots"
+    elif [[ -d "$DOTS_DIR/.git" ]]; then
+        msg "dots already present -- updating"
+        as_user git -C "$DOTS_DIR" pull --ff-only &>/dev/null \
+            && msg "dots updated" \
+            || warn "could not fast-forward $DOTS_DIR (local changes?) -- installing what is there"
+        dots_run_install
+    elif [[ -e "$DOTS_DIR" ]]; then
+        warn "$DOTS_DIR exists but is not a git checkout -- leaving it alone"
+    else
+        DOTS_TR=$(dots_transport) || DOTS_TR=""
+        if [[ -z "$DOTS_TR" ]]; then
+            warn "no usable credentials for the private repo ${DOTS_SLUG} -- skipping"
+            warn "  the rest of this run is unaffected. Finish it later with either:"
+            warn "    gh auth login && sudo $0 --only dots"
+            warn "    sudo DOTS_TOKEN=<token> $0 --only dots"
+        elif dots_clone "$DOTS_TR"; then
+            msg "cloned ${DOTS_SLUG} over ${DOTS_TR}"
+            dots_run_install
+        else
+            warn "clone of ${DOTS_SLUG} over ${DOTS_TR} failed -- skipping (run unaffected)"
+        fi
     fi
 fi
 
