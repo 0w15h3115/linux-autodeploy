@@ -554,7 +554,7 @@ fi
 echo ""
 echo "Wordlists:"
 [[ -f "$WORDLIST_DIR/rockyou.txt" ]] && echo -e "${GREEN}✓${NC} rockyou.txt" || echo -e "${RED}✗${NC} rockyou.txt"
-[[ -d "$SECLISTS" || -d "$WORDLIST_DIR/seclists" ]] && echo -e "${GREEN}✓${NC} SecLists" || echo -e "${RED}✗${NC} SecLists"
+[[ -d "${SECLISTS:-/usr/share/seclists}" || -d "$WORDLIST_DIR/seclists" ]] && echo -e "${GREEN}✓${NC} SecLists" || echo -e "${RED}✗${NC} SecLists"
 
 echo ""
 echo "=============================================="
