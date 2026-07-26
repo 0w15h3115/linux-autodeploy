@@ -182,7 +182,8 @@ sudo ./test-with-tails
 **After it finishes**
 
 - Burp Suite is downloaded but not installed — run the GUI installer yourself:
-  `./burpsuite.sh`.
+  `./burpsuite.sh`. It's the current Community build, ~380 MB, which makes it the
+  slow part of the run over Tor.
 - Tails is amnesic. Unless you are running from Persistent Storage, all of this is
   gone at the next boot and the script has to run again, over Tor.
 
@@ -191,7 +192,8 @@ sudo ./test-with-tails
 - All traffic goes through Tor, and Tor carries **neither ICMP nor UDP**. Nmap has
   to run with `-Pn`, wrapped in `proxychains` or `torify`.
 - Standing up the Apache server opens a listener on your Tails session — it pokes a
-  hole in your persec. Don't leave it running if you don't need it.
+  hole in your persec. It is started but not enabled (nothing survives the session
+  anyway); `sudo systemctl stop apache2` if you don't need it.
 
 NetExec installs as **`nxc`** in `/usr/local/bin` — that's the command name, not
 `netexec`. Its Linux build comes from a GitHub release asset, and because the newest
@@ -200,13 +202,11 @@ release doesn't always carry one (v1.5.1 ships no assets, so `/releases/latest/`
 for the newest release that actually has a Linux build rather than hardcoding a URL.
 If it can't find one it says so and points you at the releases page.
 
-**Known rough edges.** This is the original beta, imported as written rather than
-rewritten, so it doesn't have the phase engine, `--dry-run`, or the verification
-pass the Kali scripts have — and it carries a couple of real defects:
-
-- Burp is pinned to `2023.6.1` rather than tracking the current release.
-- `systemctl enable apache2` is meaningless on an amnesic system — it does not
-  survive a reboot.
+**Still a beta.** It was imported as written rather than rewritten, so it has no
+phase engine, no `--dry-run`, no verification pass, and no idempotency guarantee —
+none of what makes the Kali scripts safe to re-run or testable in a container. A
+failed step is silent; read the output. Treat it as a convenience for a throwaway
+live session, not as a deploy you'd trust unattended.
 
 ---
 

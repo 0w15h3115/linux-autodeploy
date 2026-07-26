@@ -20,10 +20,13 @@ sudo apt install nmap -y
 # Working
 
 # Install Apache server
+# Started but deliberately not enabled: Tails is amnesic, so there is no next
+# boot for an enabled unit to survive into -- `systemctl enable` writes a
+# symlink into a filesystem that disappears with the session. It also leaves a
+# listener up on a box whose whole point is not having one (see README).
 echo "Installing Apache server..."
 sudo apt install apache2 -y
 sudo systemctl start apache2
-sudo systemctl enable apache2
 # Working
 
 # Install Impacket via pip
@@ -44,8 +47,12 @@ sudo mv sliver-server /usr/local/bin/sliver-server
 # Working
 
 # Download and Install Burp Suite Community Edition
+# No version= parameter. With one (this was pinned to 2023.6.1) you pull a
+# years-stale Burp down over Tor and get told to update it on first launch;
+# without one PortSwigger serves the current Community build for the platform.
+# It is ~380 MB, so this is the slow part of the run.
 echo "Installing Burp Suite..."
-sudo -u amnesia torify wget "https://portswigger.net/burp/releases/download?product=community&version=2023.6.1&type=Linux" -O burpsuite.sh
+sudo -u amnesia torify wget "https://portswigger.net/burp/releases/download?product=community&type=Linux" -O burpsuite.sh
 sudo chmod +x burpsuite.sh
 # will need to run installer at later time (./burpsuite.sh)
 # Working somewhat
