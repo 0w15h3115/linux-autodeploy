@@ -1,6 +1,7 @@
 # linux-autodeploy
 
 [![CI](https://github.com/owlshells/linux-autodeploy/actions/workflows/ci.yml/badge.svg)](https://github.com/owlshells/linux-autodeploy/actions/workflows/ci.yml)
+[![Kali container suite](https://github.com/owlshells/linux-autodeploy/actions/workflows/container.yml/badge.svg)](https://github.com/owlshells/linux-autodeploy/actions/workflows/container.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Automated deploy scripts for Kali security workstations — one for hardware you sit
