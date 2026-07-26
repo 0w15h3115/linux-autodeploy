@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # Kali Laptop Deploy Script (kali-autodeploy-laptop)
-#
-Tools come from Kali's own kali-tools-* metapackages
+# Tools come from Kali's own kali-tools-* metapackages
 # Installs:
 #   - kali-tools-* metapackages (see TOOL_METAS below -- edit to taste)
 #   - kali-desktop-i3 (i3 + xorg + kali-desktop-core, session registered with
