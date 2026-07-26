@@ -6,7 +6,7 @@ recommended for a new deploy.
 
 | File | What |
 |------|------|
-| `ubuntu-autodeploy-v5` | Last Ubuntu version. Source of the i3 / polybar / kitty configuration that `kali-autodeploy-physical` carries over, and of the `apt_available` / `apt_install` resilience helpers both Kali scripts use. |
+| `ubuntu-autodeploy-v5` | Last Ubuntu version. Source of the i3 / polybar / kitty configuration that `kali-deploy-physical` carries over, and of the `apt_available` / `apt_install` resilience helpers both Kali scripts use. |
 | `ubuntu-autodeploy-v4` | Superseded by v5, which fixed a series of real deploy failures in it. |
 | `Ubuntu-Autodeploy-Original-Recipe.sh` | The original monolithic recipe everything grew out of. |
 
@@ -28,5 +28,5 @@ why none of the current scripts use `set -e`:
   wrote to stdout where the command substitution captured their text into the
   username.
 
-The current scripts are `kali-autodeploy-physical` and `kali-autodeploy-remote`
+The current scripts are `kali-deploy-physical` and `kali-deploy-remote`
 in the repository root.

@@ -4,7 +4,7 @@ Why these scripts are built the way they are. The README covers usage; this
 covers the reasoning, so that a change doesn't quietly undo a decision that was
 made for a reason.
 
-Applies to `kali-autodeploy-physical` and `kali-autodeploy-remote`. The Ubuntu
+Applies to `kali-deploy-physical` and `kali-deploy-remote`. The Ubuntu
 scripts in `archive/` predate most of it.
 
 ## The requirement everything else follows from
@@ -31,7 +31,7 @@ an abort.
 
 ### Prefer curated package sets over hand-maintained lists
 
-`kali-autodeploy-physical` installs `kali-tools-*` metapackages rather than
+`kali-deploy-physical` installs `kali-tools-*` metapackages rather than
 naming individual tools. Kali curates them and resolves their dependencies, so
 they survive rolling-release churn that a hand-listed set does not. A package
 name that no longer resolves is the single most common way a deploy dies.
@@ -53,12 +53,12 @@ retried in isolation.
 
 ### Never lock the operator out
 
-`kali-autodeploy-remote` will not disable SSH password authentication or enable
+`kali-deploy-remote` will not disable SSH password authentication or enable
 the firewall unless it can prove another way in exists — an installed key, or
 Tailscale already up. A box that cannot reach itself is worse than one with
 password auth enabled.
 
-`kali-autodeploy-physical` inverts this: you have the keyboard, so default-deny
+`kali-deploy-physical` inverts this: you have the keyboard, so default-deny
 inbound is enabled unconditionally.
 
 ### Distro-native, no third-party repositories
@@ -103,7 +103,7 @@ are never captured by a `$(...)` substitution), `get_real_user` /
 `get_user_home`, `apt_available` / `apt_install` / `apt_install_first`, and
 `check` for verification.
 
-`kali-autodeploy-physical` adds `run()` and `write_file()` so `--dry-run` is
+`kali-deploy-physical` adds `run()` and `write_file()` so `--dry-run` is
 honoured in one place rather than at every call site.
 
 ## Testing

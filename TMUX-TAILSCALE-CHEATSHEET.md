@@ -1,6 +1,6 @@
 # Headless Kali: Tailscale + tmux Cheat-Sheet
 
-Companion to `kali-autodeploy-remote`. This box has **no GUI** — you reach it over
+Companion to `kali-deploy-remote`. This box has **no GUI** — you reach it over
 Tailscale and run multiple terminals inside **tmux**.
 
 ---
@@ -8,7 +8,7 @@ Tailscale and run multiple terminals inside **tmux**.
 ## 1. Deploy the box
 
 ```bash
-sudo ./kali-autodeploy-remote
+sudo ./kali-deploy-remote
 ```
 
 Optional environment variables (all can be combined):
@@ -25,7 +25,7 @@ Scalable one-liner for repeat deploys:
 
 ```bash
 TS_AUTHKEY=tskey-xxxx TS_ADVERTISE_TAGS=tag:kali \
-  SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" sudo ./kali-autodeploy-remote
+  SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" sudo ./kali-deploy-remote
 ```
 
 **One-time tailnet setup** (in the Tailscale admin console → Access Controls):

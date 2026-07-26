@@ -1,7 +1,7 @@
 # Tooling deployment scripts
 
-[![CI](https://github.com/owlshells/linux-autodeploy/actions/workflows/ci.yml/badge.svg)](https://github.com/owlshells/linux-autodeploy/actions/workflows/ci.yml)
-[![Kali container suite](https://github.com/owlshells/linux-autodeploy/actions/workflows/container.yml/badge.svg)](https://github.com/owlshells/linux-autodeploy/actions/workflows/container.yml)
+[![CI](https://github.com/owlshells/tooling-deployment-scripts/actions/workflows/ci.yml/badge.svg)](https://github.com/owlshells/tooling-deployment-scripts/actions/workflows/ci.yml)
+[![Kali container suite](https://github.com/owlshells/tooling-deployment-scripts/actions/workflows/container.yml/badge.svg)](https://github.com/owlshells/tooling-deployment-scripts/actions/workflows/container.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Automated deploy scripts for Kali security workstations — one for hardware you sit
@@ -14,21 +14,21 @@ Kali container before they touch a machine.
 
 | Script | Target | Desktop | Access |
 |---|---|---|---|
-| **`kali-autodeploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
-| **`kali-autodeploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
+| **`kali-deploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
+| **`kali-deploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
 
 Superseded Ubuntu scripts live in [`archive/`](archive/). `SPEC.md` covers the
 design reasoning behind the current pair.
 
 ---
 
-## kali-autodeploy-physical
+## kali-deploy-physical
 
 A Kali-first deploy for a laptop you carry: the full tool set, the i3 desktop, and
 hardening aimed at a conference network.
 
 ```bash
-sudo ./kali-autodeploy-physical
+sudo ./kali-deploy-physical
 ```
 
 Options:
@@ -46,7 +46,7 @@ Phases: `base tools desktop harden i3 polybar kitty shell wordlists`
 
 Re-running is always safe — every phase is idempotent, so a run that dies partway
 can be resumed by running it again (or narrowed with `--only`). A full transcript
-goes to `/var/log/kali-autodeploy-physical-<timestamp>.log`.
+goes to `/var/log/kali-deploy-physical-<timestamp>.log`.
 
 ### What it installs
 
@@ -109,19 +109,19 @@ end rather than claiming they passed:
 Kali's own zsh config is left intact; the script appends a marker-guarded block with
 PATH, wordlist variables, and aliases. Oh My Zsh is deliberately *not* installed —
 Kali already ships syntax highlighting and autosuggestions, and OMZ only adds startup
-cost. To remove, delete the block between the `kali-autodeploy-physical` markers in
+cost. To remove, delete the block between the `kali-deploy-physical` markers in
 `~/.zshrc`.
 
 ---
 
-## kali-autodeploy-remote (headless)
+## kali-deploy-remote (headless)
 
 For a box you reach over Tailscale rather than sit at. Installs the Kali tool set with
 no GUI, joins a tailnet with Tailscale SSH as the primary auth path, hardens OpenSSH as
 a fallback, and restricts inbound to the `tailscale0` interface.
 
 ```bash
-sudo ./kali-autodeploy-remote [agent] [profile]
+sudo ./kali-deploy-remote [agent] [profile]
 ```
 
 Environment knobs: `TS_AUTHKEY`, `TS_ADVERTISE_TAGS`, `SSH_PUBKEY`, `SKIP_TAILSCALE=1`,
@@ -138,7 +138,7 @@ See `TMUX-TAILSCALE-CHEATSHEET.md`.
 ## Testing
 
 Deploy scripts are hard to test because the failure mode is a half-configured machine.
-`tests/` validates `kali-autodeploy-physical` against a real Kali container before it
+`tests/` validates `kali-deploy-physical` against a real Kali container before it
 touches hardware:
 
 ```bash

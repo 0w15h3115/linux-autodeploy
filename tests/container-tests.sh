@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT="${SCRIPT:-/repo/kali-autodeploy-physical}"
+SCRIPT="${SCRIPT:-/repo/kali-deploy-physical}"
 TEST_USER="tester"
 FAILED=0
 PASSED=0
@@ -145,7 +145,7 @@ head_ "T5: idempotency -- second run must not duplicate"
 # ------------------------------------------------------------------------------
 as_sudo --only shell >/dev/null 2>&1
 as_sudo --only shell >/dev/null 2>&1
-n=$(grep -cF '>>> kali-autodeploy-physical >>>' "$USER_HOME/.zshrc")
+n=$(grep -cF '>>> kali-deploy-physical >>>' "$USER_HOME/.zshrc")
 (( n == 1 )) \
     && pass "zshrc block appears exactly once after 3 runs" \
     || fail "zshrc block appears $n times (expected 1)"

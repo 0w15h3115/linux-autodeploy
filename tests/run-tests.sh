@@ -1,5 +1,5 @@
 #!/bin/bash
-# run-tests.sh -- validate kali-autodeploy-physical before it touches hardware.
+# run-tests.sh -- validate kali-deploy-physical before it touches hardware.
 #
 # Runs static analysis on the host, then the full suite inside a throwaway
 # kalilinux/kali-rolling container. Nothing here modifies your machine.
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT_NAME="kali-autodeploy-physical"   # the script under test, repo-relative
+SCRIPT_NAME="kali-deploy-physical"   # the script under test, repo-relative
 IMAGE="kalilinux/kali-rolling:latest"
 STATIC_ONLY=0
 
@@ -30,7 +30,7 @@ head_ "Static analysis (host)"
 # written to avoid.
 CHECK_FILES=(
     "$SCRIPT_NAME"
-    kali-autodeploy-remote
+    kali-deploy-remote
     tests/run-tests.sh
     tests/container-tests.sh
 )
