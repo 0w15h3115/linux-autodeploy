@@ -114,6 +114,11 @@ PKGS=(
 
     seclists
     wordlists
+
+    # Command library / cheat-sheets. Replaces the hand-maintained snippets
+    # that used to live in the dots repo: same {{placeholder}} grammar, 200+
+    # sheets, and Kali maintains it so updates arrive via apt.
+    arsenal-ng
 )
 
 readonly ALL_PHASES=(base tools tailscale ssh firewall tmux shell dots wordlists)
