@@ -1045,9 +1045,10 @@ if should_run dots; then
         DOTS_TR=$(dots_transport) || DOTS_TR=""
         if [[ -z "$DOTS_TR" ]]; then
             warn "no usable credentials for the private repo ${DOTS_SLUG} -- skipping"
-            warn "  the rest of this run is unaffected. Finish it later with either:"
-            warn "    gh auth login && sudo $0 --only dots"
+            warn "  the rest of this run is unaffected. Finish it later with:"
             warn "    sudo DOTS_TOKEN=<token> $0 --only dots"
+            warn "  (or restore an SSH key, or install gh and \`gh auth login\` --"
+            warn "   gh ships from GitHub's apt repo, not Kali's, so it is not here)"
         elif dots_clone "$DOTS_TR"; then
             msg "cloned ${DOTS_SLUG} over ${DOTS_TR}"
             dots_run_install

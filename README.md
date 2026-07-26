@@ -115,7 +115,7 @@ work — a shell kit is never a reason to redo an install:
 |-------|-----------|-------|
 | 1 | `DOTS_TOKEN` | `sudo DOTS_TOKEN=<pat> ./kali-deploy-... ` |
 | 2 | SSH | a key already on the box, agent or on disk |
-| 3 | `gh` | `gh auth login` run beforehand |
+| 3 | `gh` | `gh auth login`, *if* gh is present — it ships from GitHub's own apt repo, not Kali's, so a stock box will not have it |
 
 A token is passed as a per-invocation `http.extraHeader`, never embedded in the
 remote URL — a URL credential gets persisted into `.git/config` and echoed back in
@@ -123,7 +123,11 @@ git's error output, and this script's transcript goes to `/var/log`. `git` is al
 pinned to `BatchMode`/`GIT_TERMINAL_PROMPT=0` so it can never sit waiting for input
 on a box nobody is standing in front of.
 
-Finish it later with `sudo ./kali-deploy-<physical|remote> --only dots`.
+Finish it later with `sudo DOTS_TOKEN=<token> ./kali-deploy-<physical|remote>
+--only dots`. On a freshly imaged box `DOTS_TOKEN` or a restored SSH key are the
+only transports that exist: `gh` is not in Kali's repos, and adding GitHub's apt
+source would mean a second third-party repo when Tailscale is the one declared
+exception.
 
 Set `DOTS_REPO=owner/name` to point the phase at a different kit.
 
