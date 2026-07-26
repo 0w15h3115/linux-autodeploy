@@ -193,12 +193,17 @@ sudo ./test-with-tails
 - Standing up the Apache server opens a listener on your Tails session — it pokes a
   hole in your persec. Don't leave it running if you don't need it.
 
+NetExec installs as **`nxc`** in `/usr/local/bin` — that's the command name, not
+`netexec`. Its Linux build comes from a GitHub release asset, and because the newest
+release doesn't always carry one (v1.5.1 ships no assets, so `/releases/latest/`
+404s) and the asset name has changed shape across versions, the script asks the API
+for the newest release that actually has a Linux build rather than hardcoding a URL.
+If it can't find one it says so and points you at the releases page.
+
 **Known rough edges.** This is the original beta, imported as written rather than
 rewritten, so it doesn't have the phase engine, `--dry-run`, or the verification
-pass the Kali scripts have — and it carries a few real defects:
+pass the Kali scripts have — and it carries a couple of real defects:
 
-- NetExec is **not** actually installed. The download fetches the GitHub project
-  page rather than a release, and then marks the HTML executable.
 - Burp is pinned to `2023.6.1` rather than tracking the current release.
 - `systemctl enable apache2` is meaningless on an amnesic system — it does not
   survive a reboot.

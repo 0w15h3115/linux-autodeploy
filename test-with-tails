@@ -51,10 +51,40 @@ sudo chmod +x burpsuite.sh
 # Working somewhat
 
 # Install Netexec
-pipx ensurepath
-sudo -u amnesia torify wget https://github.com/Pennyw0rth/NetExec -O netexec
-chmod +x netexec
-# working somewhat
+# NetExec ships a prebuilt Linux binary as a GitHub release asset, but the
+# newest release does not always carry one (v1.5.1 has no assets at all), so
+# /releases/latest/download 404s. The asset name has also changed across
+# versions -- nxc, nxc-ubuntu-latest, nxc-ubuntu-latest.zip -- so ask the API
+# for the newest release that actually has a Linux build and take its name as
+# it comes.
+echo "Installing NetExec..."
+sudo apt install unzip -y
+NXC_URL=$(sudo -u amnesia torify wget -qO- https://api.github.com/repos/Pennyw0rth/NetExec/releases | python3 -c '
+import json, re, sys
+for rel in json.load(sys.stdin):
+    if rel["draft"] or rel["prerelease"]:
+        continue
+    for asset in rel["assets"]:
+        if re.search(r"ubuntu|linux", asset["name"], re.I) or asset["name"] == "nxc":
+            print(asset["browser_download_url"])
+            sys.exit()
+')
+if [ -n "$NXC_URL" ]; then
+    echo "  from $NXC_URL"
+    sudo -u amnesia torify wget "$NXC_URL" -O /tmp/nxc.download
+    case "$NXC_URL" in
+        *.zip) unzip -p /tmp/nxc.download nxc > /tmp/nxc ;;
+        *)     cp /tmp/nxc.download /tmp/nxc ;;
+    esac
+    rm -f /tmp/nxc.download
+    chmod +x /tmp/nxc
+    sudo mv /tmp/nxc /usr/local/bin/nxc
+    nxc --version && echo "NetExec installed as nxc"
+else
+    echo "NetExec: no Linux release asset found, skipping. Install it by hand:"
+    echo "  https://github.com/Pennyw0rth/NetExec/releases"
+fi
+# Working -- binary lands at /usr/local/bin/nxc, run it as: nxc smb <target>
 
 # Install Proxychains
 sudo apt install proxychains -y
