@@ -1,8 +1,9 @@
 #!/bin/bash
-# run-tests.sh -- validate kali-deploy-physical before it touches hardware.
+# run-tests.sh -- validate the deploy scripts before they touch hardware.
 #
 # Runs static analysis on the host, then the full suite inside a throwaway
-# kalilinux/kali-rolling container. Nothing here modifies your machine.
+# kalilinux/kali-rolling container. Both deploy scripts are exercised. Nothing
+# here modifies your machine.
 #
 # Usage: tests/run-tests.sh [--static-only]
 #
@@ -11,7 +12,8 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT_NAME="kali-deploy-physical"   # the script under test, repo-relative
+PHYSICAL="kali-deploy-physical"      # scripts under test, repo-relative
+REMOTE="kali-deploy-remote"
 IMAGE="kalilinux/kali-rolling:latest"
 STATIC_ONLY=0
 
@@ -29,8 +31,8 @@ head_ "Static analysis (host)"
 # those are superseded and full of the very patterns the current scripts were
 # written to avoid.
 CHECK_FILES=(
-    "$SCRIPT_NAME"
-    kali-deploy-remote
+    "$PHYSICAL"
+    "$REMOTE"
     tests/run-tests.sh
     tests/container-tests.sh
 )
@@ -86,7 +88,8 @@ docker image inspect "$IMAGE" &>/dev/null || {
 # uses. Read-only bind mount: the tests must never modify the repo.
 docker run --rm \
     -v "$REPO:/repo:ro" \
-    -e SCRIPT="/repo/$SCRIPT_NAME" \
+    -e SCRIPT="/repo/$PHYSICAL" \
+    -e SCRIPT_REMOTE="/repo/$REMOTE" \
     "$IMAGE" \
     bash /repo/tests/container-tests.sh
 container_rc=$?

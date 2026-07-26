@@ -53,6 +53,13 @@ Find the box's tailnet IP (on the box): `tailscale ip -4`  (alias: `tsip`).
 Your `.zshrc` **auto-attaches to a `main` tmux session on SSH login**, so you
 usually land straight into your persistent workspace.
 
+For a plain shell instead — the day tmux itself is what's wedged — connect with
+the escape hatch:
+
+```bash
+NO_AUTO_TMUX=1 tailscale ssh kali@<hostname>
+```
+
 ---
 
 ## 3. tmux — the essentials

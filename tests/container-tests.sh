@@ -5,17 +5,27 @@
 #
 # The point of these tests is that a deploy failure on real hardware costs you
 # an OS reinstall. Everything that can be caught in a container is caught here.
+#
+# Both deploy scripts are exercised. The shared assertions (package resolution,
+# dependency resolution, dry-run inertness, idempotency, argument handling, and
+# the verification/install cross-check) run against each; the phases that only
+# one script has get their own sections.
 
 set -uo pipefail
 
-SCRIPT="${SCRIPT:-/repo/kali-deploy-physical}"
+PHYSICAL="${SCRIPT:-/repo/kali-deploy-physical}"
+REMOTE="${SCRIPT_REMOTE:-/repo/kali-deploy-remote}"
 TEST_USER="tester"
 FAILED=0
 PASSED=0
 
+# Set per suite so as_sudo and the shared tests don't need it threaded through.
+SCRIPT="$PHYSICAL"
+
 pass() { echo -e "\033[0;32m  PASS\033[0m $1"; PASSED=$((PASSED+1)); }
 fail() { echo -e "\033[0;31m  FAIL\033[0m $1"; FAILED=$((FAILED+1)); }
 head_() { echo -e "\n\033[1;34m== $1\033[0m"; }
+sect() { echo -e "\n\033[1;35m######## $1\033[0m"; }
 
 # Mimic `sudo ./script`: root euid with SUDO_USER pointing at a real account.
 as_sudo() { SUDO_USER="$TEST_USER" DEBIAN_FRONTEND=noninteractive "$SCRIPT" "$@"; }
@@ -28,76 +38,222 @@ echo "  test user: $TEST_USER ($USER_HOME)"
 apt-get update -qq >/dev/null 2>&1
 echo "  apt lists updated"
 
-# The base kali-rolling image is minimal; the tests themselves need a few
-# utilities that a real Kali install would already have.
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    findutils coreutils gawk sed grep procps iproute2 >/dev/null 2>&1
-# i3 itself, so T4 can validate the generated config with `i3 -C`. A syntax
-# error there means a desktop that won't start at the greeter, which is
-# precisely the failure this suite exists to catch before it reaches hardware.
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    --no-install-recommends i3-wm >/dev/null 2>&1
-echo "  test prerequisites installed"
+# apt-file maps a binary back to the package that ships it, which is how T9
+# tells "installed" from "merely verified". Installed up front because the
+# package-level checks below need it; nothing it pulls in ships a binary any
+# deploy script verifies.
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apt-file >/dev/null 2>&1
+apt-file update >/dev/null 2>&1
+echo "  apt-file cache built"
 
-# ------------------------------------------------------------------------------
-head_ "T1: every package name resolves"
-# This is the test that matters most. v4 died because openjdk-8-jre had no
-# installation candidate and took the entire apt batch down with it.
-# ------------------------------------------------------------------------------
-missing=()
-while read -r pkg; do
-    [[ -z "$pkg" ]] && continue
-    cand=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}')
-    if [[ -z "$cand" || "$cand" == "(none)" ]]; then
-        missing+=("$pkg")
-        echo "    no candidate: $pkg"
+# The rest of the prerequisites are installed LATER, deliberately.
+#
+# `apt-get install --simulate` only lists packages it would newly install, so
+# anything already present is absent from the closure T9 checks against. Install
+# tmux here and T9 reports tmux as verified-but-not-installed -- a false alarm
+# that would train you to ignore the one test that catches a real gap. So the
+# package-level checks run against a pristine image, and these land afterwards.
+install_test_prereqs() {
+    head_ "Installing test prerequisites"
+    # The base kali-rolling image is minimal; the tests need utilities a real
+    # Kali install would already have. ufw so the firewall lockout guard is
+    # exercised for real rather than short-circuiting on "ufw not installed".
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        findutils coreutils gawk sed grep procps iproute2 tmux ufw >/dev/null 2>&1
+    # i3 itself, so T4 can validate the generated config with `i3 -C`. A syntax
+    # error there means a desktop that won't start at the greeter, which is
+    # precisely the failure this suite exists to catch before it reaches hardware.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        --no-install-recommends i3-wm >/dev/null 2>&1
+    echo "  test prerequisites installed"
+}
+
+# ==============================================================================
+# Shared assertions, run against each script.
+# ==============================================================================
+
+# T1 -- every package name resolves.
+# The test that matters most: v4 died because openjdk-8-jre had no installation
+# candidate and took the entire apt batch down with it.
+t_packages_resolve() {
+    head_ "T1: every package name resolves"
+    local missing=() pkg cand
+    while read -r pkg; do
+        [[ -z "$pkg" ]] && continue
+        cand=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}')
+        if [[ -z "$cand" || "$cand" == "(none)" ]]; then
+            missing+=("$pkg")
+            echo "    no candidate: $pkg"
+        fi
+    done < <("$SCRIPT" --print-packages)
+
+    if (( ${#missing[@]} == 0 )); then
+        pass "all packages have an installation candidate"
+    else
+        fail "${#missing[@]} package(s) unresolvable: ${missing[*]}"
     fi
-done < <("$SCRIPT" --print-packages)
+}
 
-if (( ${#missing[@]} == 0 )); then
-    pass "all packages have an installation candidate"
-else
-    fail "${#missing[@]} package(s) unresolvable: ${missing[*]}"
-fi
+# T2 -- dependency resolution. Catches conflicts between metapackages without
+# downloading gigabytes. Writes the install closure to $CLOSURE for T9.
+CLOSURE=/tmp/closure.txt
+t_deps_resolve() {
+    head_ "T2: dependency resolution (apt --simulate)"
+    local all_pkgs resolvable=() p cand sim_out rc
+    mapfile -t all_pkgs < <("$SCRIPT" --print-packages)
+    for p in "${all_pkgs[@]}"; do
+        cand=$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/ {print $2}')
+        [[ -n "$cand" && "$cand" != "(none)" ]] && resolvable+=("$p")
+    done
 
-# ------------------------------------------------------------------------------
-head_ "T2: dependency resolution (apt --simulate)"
-# Catches conflicts between metapackages without downloading gigabytes.
-# ------------------------------------------------------------------------------
-mapfile -t all_pkgs < <("$SCRIPT" --print-packages)
-resolvable=()
-for p in "${all_pkgs[@]}"; do
-    cand=$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/ {print $2}')
-    [[ -n "$cand" && "$cand" != "(none)" ]] && resolvable+=("$p")
+    sim_out=$(apt-get install --simulate -y "${resolvable[@]}" 2>&1); rc=$?
+    awk '/^Inst /{print $2}' <<<"$sim_out" | sort -u > "$CLOSURE"
+
+    if (( rc == 0 )); then
+        pass "apt resolves the full set ($(wc -l <"$CLOSURE") packages would be installed)"
+    else
+        fail "apt could not resolve the set"
+        grep -iE 'unmet|conflict|broken|E:' <<<"$sim_out" | head -10 | sed 's/^/    /'
+    fi
+}
+
+# T9 -- every binary the verification pass ticks is actually installed.
+#
+# This is the test that would have caught the real bug: the physical script
+# verified netexec, mitm6, certipy, enum4linux-ng, bloodhound-python, ffuf and
+# gobuster while installing none of them. Four were present only because the
+# Kali ISO ships kali-linux-default -- luck, not intent, and gone on a netinst.
+# A red X at the end of a 40-minute deploy is how you'd have found out.
+#
+# EXTERNAL_BINS are the deliberate exceptions: things installed from outside
+# Kali's repos. Anything else with no providing package is a typo and fails.
+t_verified_is_installed() {
+    local EXTERNAL_BINS=" tailscale "
+    head_ "T9: verified binaries are actually installed"
+    local bins b owner o hit missing=() external=()
+    mapfile -t bins < <("$SCRIPT" --print-checked-binaries)
+
+    for b in "${bins[@]}"; do
+        [[ -z "$b" ]] && continue
+        if [[ "$EXTERNAL_BINS" == *" $b "* ]]; then
+            external+=("$b"); continue
+        fi
+        owner=$(apt-file search -x "/(s?bin)/${b}$" 2>/dev/null | cut -d: -f1 | sort -u)
+        if [[ -z "$owner" ]]; then
+            missing+=("$b (no Kali package ships this binary -- typo?)")
+            continue
+        fi
+        hit=""
+        for o in $owner; do
+            grep -qxF "$o" "$CLOSURE" && { hit="$o"; break; }
+        done
+        [[ -z "$hit" ]] && missing+=("$b (needs: $(tr '\n' ' ' <<<"$owner"))")
+    done
+
+    if (( ${#missing[@]} == 0 )); then
+        pass "all ${#bins[@]} verified binaries are in the install set"
+    else
+        fail "${#missing[@]} binary(ies) verified but never installed"
+        printf '    %s\n' "${missing[@]}"
+    fi
+    (( ${#external[@]} )) && echo "    (not from Kali repos, by design: ${external[*]})"
+    return 0
+}
+
+# T3 -- --dry-run changes nothing.
+t_dry_run_inert() {
+    head_ "T3: --dry-run changes nothing"
+    local watch=("$USER_HOME" /etc/NetworkManager /etc/ssh /etc/apt/sources.list.d)
+    local before after
+    before=$(find "${watch[@]}" -type f 2>/dev/null | sort | xargs md5sum 2>/dev/null | md5sum)
+    if as_sudo --dry-run >/tmp/dryrun.log 2>&1; then
+        pass "--dry-run exits 0"
+    else
+        fail "--dry-run exited non-zero (see /tmp/dryrun.log)"
+        tail -15 /tmp/dryrun.log | sed 's/^/    /'
+    fi
+    after=$(find "${watch[@]}" -type f 2>/dev/null | sort | xargs md5sum 2>/dev/null | md5sum)
+    [[ "$before" == "$after" ]] \
+        && pass "--dry-run left the filesystem untouched" \
+        || fail "--dry-run modified the filesystem"
+
+    grep -q 'dry-run' /tmp/dryrun.log \
+        && pass "--dry-run annotated its actions" \
+        || fail "--dry-run produced no [dry-run] lines"
+}
+
+# T5 -- idempotency. The zshrc block must appear exactly once no matter how many
+# times the script runs. The remote script used to have no marker at all, so a
+# second run duplicated every alias and the tmux auto-attach hook.
+t_idempotent_shell() {
+    local marker="$1"
+    head_ "T5: idempotency -- second run must not duplicate"
+    as_sudo --only shell >/dev/null 2>&1
+    as_sudo --only shell >/dev/null 2>&1
+    as_sudo --only shell >/dev/null 2>&1
+    local n
+    n=$(grep -cF "$marker" "$USER_HOME/.zshrc" 2>/dev/null || echo 0)
+    (( n == 1 )) \
+        && pass "zshrc block appears exactly once after 3 runs" \
+        || fail "zshrc block appears $n times (expected 1)"
+}
+
+# T8 -- bad input is rejected, and --help stays clean.
+t_bad_input() {
+    head_ "T8: bad input is rejected"
+    as_sudo --only nosuchphase >/dev/null 2>&1 \
+        && fail "unknown phase was accepted" \
+        || pass "unknown phase rejected"
+
+    as_sudo --skip >/dev/null 2>&1 \
+        && fail "--skip with no argument was accepted" \
+        || pass "--skip with no argument rejected"
+
+    if SUDO_USER="root" "$SCRIPT" --only wordlists >/dev/null 2>&1; then
+        fail "running as root directly was accepted"
+    else
+        pass "running as root directly is rejected"
+    fi
+
+    # --help prints the header comment block. It used to do that by hardcoded
+    # line range, so trimming the header spilled `set -uo pipefail` and the
+    # readonly declarations into the help output.
+    local help_out
+    help_out=$("$SCRIPT" --help 2>&1)
+    if grep -qE '^\s*(set -|readonly |[A-Z_]+=\(|\}|fi$)' <<<"$help_out"; then
+        fail "--help is leaking shell code"
+        grep -nE '^\s*(set -|readonly |[A-Z_]+=\(|\}|fi$)' <<<"$help_out" \
+            | head -5 | sed 's/^/    /'
+    else
+        pass "--help contains no shell code"
+    fi
+
+    grep -q -- '--dry-run' <<<"$help_out" \
+        && pass "--help documents the options" \
+        || fail "--help is missing the options block"
+}
+
+# ==============================================================================
+sect "Package-level checks (pristine image, both scripts)"
+# These must run before any test prerequisite is installed -- see the comment on
+# install_test_prereqs.
+# ==============================================================================
+for _s in "$PHYSICAL" "$REMOTE"; do
+    echo -e "\n\033[1m--- $(basename "$_s") ---\033[0m"
+    SCRIPT="$_s"
+    t_packages_resolve
+    t_deps_resolve
+    t_verified_is_installed
 done
 
-sim_out=$(apt-get install --simulate -y "${resolvable[@]}" 2>&1)
-if (( $? == 0 )); then
-    n=$(grep -cE '^Inst ' <<<"$sim_out")
-    pass "apt resolves the full set ($n packages would be installed)"
-else
-    fail "apt could not resolve the set"
-    grep -iE 'unmet|conflict|broken|E:' <<<"$sim_out" | head -10 | sed 's/^/    /'
-fi
+install_test_prereqs
 
-# ------------------------------------------------------------------------------
-head_ "T3: --dry-run changes nothing"
-# ------------------------------------------------------------------------------
-before=$(find "$USER_HOME" /etc/NetworkManager -type f 2>/dev/null | sort | md5sum)
-if as_sudo --dry-run >/tmp/dryrun.log 2>&1; then
-    pass "--dry-run exits 0"
-else
-    fail "--dry-run exited $? (see /tmp/dryrun.log)"
-    tail -15 /tmp/dryrun.log | sed 's/^/    /'
-fi
-after=$(find "$USER_HOME" /etc/NetworkManager -type f 2>/dev/null | sort | md5sum)
-[[ "$before" == "$after" ]] \
-    && pass "--dry-run left the filesystem untouched" \
-    || fail "--dry-run modified the filesystem"
+# ==============================================================================
+sect "kali-deploy-physical"
+# ==============================================================================
+SCRIPT="$PHYSICAL"
 
-grep -q 'dry-run' /tmp/dryrun.log \
-    && pass "--dry-run annotated its actions" \
-    || fail "--dry-run produced no [dry-run] lines"
+t_dry_run_inert
 
 # ------------------------------------------------------------------------------
 head_ "T4: config phases run for real and exit 0"
@@ -140,19 +296,24 @@ else
     echo "    (i3 not installed in container -- skipping config validation)"
 fi
 
-# ------------------------------------------------------------------------------
-head_ "T5: idempotency -- second run must not duplicate"
-# ------------------------------------------------------------------------------
-as_sudo --only shell >/dev/null 2>&1
-as_sudo --only shell >/dev/null 2>&1
-n=$(grep -cF '>>> kali-deploy-physical >>>' "$USER_HOME/.zshrc")
-(( n == 1 )) \
-    && pass "zshrc block appears exactly once after 3 runs" \
-    || fail "zshrc block appears $n times (expected 1)"
+t_idempotent_shell '>>> kali-deploy-physical >>>'
 
 as_sudo --only i3 --only polybar --only kitty >/tmp/rerun.log 2>&1 \
     && pass "config phases re-run cleanly" \
     || fail "config phases failed on re-run"
+
+# The i3 backup must survive a re-run. Copying unconditionally meant the second
+# run overwrote config.backup with our own generated config.
+head_ "T4b: the original config backup survives re-runs"
+printf 'THIS IS THE ORIGINAL\n' > "$USER_HOME/.config/i3/config"
+rm -f "$USER_HOME/.config/i3/config.backup"
+as_sudo --only i3 >/dev/null 2>&1
+as_sudo --only i3 >/dev/null 2>&1
+if grep -qF 'THIS IS THE ORIGINAL' "$USER_HOME/.config/i3/config.backup" 2>/dev/null; then
+    pass "config.backup still holds the pre-script original after 2 runs"
+else
+    fail "config.backup was overwritten by a generated config"
+fi
 
 # ------------------------------------------------------------------------------
 head_ "T6: graceful degradation -- no systemd, no ufw"
@@ -165,6 +326,13 @@ if as_sudo --only harden >/tmp/harden.log 2>&1; then
 else
     fail "harden phase exited non-zero without systemd"
     tail -15 /tmp/harden.log | sed 's/^/    /'
+fi
+
+# disable_unit used to warn on failure and then claim success anyway.
+if grep -qE '^\S*\[\+\]\S* disabled ' /tmp/harden.log; then
+    fail "harden claimed it disabled a unit on a container with no systemd"
+else
+    pass "harden does not claim to have disabled units it could not touch"
 fi
 
 # ------------------------------------------------------------------------------
@@ -189,43 +357,162 @@ if SUDO_USER="$TEST_USER" DEBIAN_FRONTEND=noninteractive /tmp/injected \
         || fail "bogus package was not reported"
     pass "run continued to completion despite bogus package"
 else
-    fail "run aborted on a bogus package (exit $?)"
+    fail "run aborted on a bogus package"
     tail -15 /tmp/inject.log | sed 's/^/    /'
 fi
 
-# ------------------------------------------------------------------------------
-head_ "T8: bad input is rejected"
-# ------------------------------------------------------------------------------
-as_sudo --only nosuchphase >/dev/null 2>&1 \
-    && fail "unknown phase was accepted" \
-    || pass "unknown phase rejected"
+t_bad_input
 
-as_sudo --skip >/dev/null 2>&1 \
-    && fail "--skip with no argument was accepted" \
-    || pass "--skip with no argument rejected"
+# ==============================================================================
+sect "kali-deploy-remote"
+# ==============================================================================
+SCRIPT="$REMOTE"
 
-if SUDO_USER="root" "$SCRIPT" --only wordlists >/dev/null 2>&1; then
-    fail "running as root directly was accepted"
+# Start this suite from a clean home so the physical script's zshrc block and
+# configs can't mask a remote-side bug.
+rm -rf "${USER_HOME:?}"/.zshrc "$USER_HOME"/.zshrc.backup "$USER_HOME"/.tmux.conf \
+       "$USER_HOME"/.tmux.conf.backup
+touch "$USER_HOME/.zshrc" && chown "$TEST_USER:$TEST_USER" "$USER_HOME/.zshrc"
+
+t_dry_run_inert
+
+# ------------------------------------------------------------------------------
+head_ "R4: config phases run for real and exit 0"
+# ------------------------------------------------------------------------------
+if as_sudo --only tmux --only shell --only wordlists >/tmp/rconfig.log 2>&1; then
+    pass "config phases exit 0"
 else
-    pass "running as root directly is rejected"
+    fail "config phases exited non-zero (see /tmp/rconfig.log)"
+    tail -20 /tmp/rconfig.log | sed 's/^/    /'
 fi
 
-# --help prints the header comment block. It used to do that by hardcoded line
-# range, so trimming the header spilled `set -uo pipefail` and the readonly
-# declarations into the help output. Assert no shell code leaks.
-help_out=$("$SCRIPT" --help 2>&1)
-if grep -qE '^\s*(set -|readonly |[A-Z_]+=\(|\}|fi$)' <<<"$help_out"; then
-    fail "--help is leaking shell code"
-    grep -nE '^\s*(set -|readonly |[A-Z_]+=\(|\}|fi$)' <<<"$help_out" | head -5 | sed 's/^/    /'
+for f in .tmux.conf .zshrc; do
+    if [[ -f "$USER_HOME/$f" ]]; then
+        owner=$(stat -c '%U' "$USER_HOME/$f")
+        [[ "$owner" == "$TEST_USER" ]] \
+            && pass "$f written, owned by $TEST_USER" \
+            || fail "$f owned by $owner, expected $TEST_USER"
+    else
+        fail "$f was not created"
+    fi
+done
+
+# The shell phase must not resurrect Oh My Zsh, and must not leave the
+# interpolated-into-Python encoders behind.
+grep -q "oh-my-zsh\|ZSH_THEME" "$USER_HOME/.zshrc" \
+    && fail "zshrc references Oh My Zsh / ZSH_THEME" \
+    || pass "no Oh My Zsh in the generated zshrc"
+
+if grep -q 'sys.argv\[1\]' "$USER_HOME/.zshrc"; then
+    pass "urlencode/urldecode pass arguments as argv"
 else
-    pass "--help contains no shell code"
+    fail "urlencode/urldecode still interpolate into the Python source"
 fi
 
-grep -q -- '--dry-run' <<<"$help_out" \
-    && pass "--help documents the options" \
-    || fail "--help is missing the options block"
+# The auto-attach hook needs an escape hatch for the day tmux is what's broken.
+grep -q 'NO_AUTO_TMUX' "$USER_HOME/.zshrc" \
+    && pass "tmux auto-attach honours NO_AUTO_TMUX" \
+    || fail "tmux auto-attach has no escape hatch"
+
+# tmux must accept the generated config. -f with a no-op command parses the file
+# without needing a server or a terminal.
+if command -v tmux &>/dev/null; then
+    if tmux -f "$USER_HOME/.tmux.conf" start-server \; kill-server >/tmp/tmuxcheck.log 2>&1; then
+        pass "tmux validates the generated config"
+    else
+        fail "tmux rejected the generated config"
+        head -10 /tmp/tmuxcheck.log | sed 's/^/    /'
+    fi
+else
+    echo "    (tmux not installed in container -- skipping config validation)"
+fi
+
+t_idempotent_shell '>>> kali-deploy-remote >>>'
 
 # ------------------------------------------------------------------------------
+head_ "R5: backups survive a re-run"
+# ------------------------------------------------------------------------------
+printf 'THIS IS THE ORIGINAL\n' > "$USER_HOME/.tmux.conf"
+rm -f "$USER_HOME/.tmux.conf.backup"
+as_sudo --only tmux >/dev/null 2>&1
+as_sudo --only tmux >/dev/null 2>&1
+if grep -qF 'THIS IS THE ORIGINAL' "$USER_HOME/.tmux.conf.backup" 2>/dev/null; then
+    pass ".tmux.conf.backup still holds the pre-script original after 2 runs"
+else
+    fail ".tmux.conf.backup was overwritten by a generated config"
+fi
+
+# ------------------------------------------------------------------------------
+head_ "R6: lockout guards and graceful degradation"
+# The ssh and firewall phases are the ones that can strand a remote box. With no
+# systemd, no key and no tailnet they must degrade rather than abort -- and must
+# NOT disable password auth or enable the firewall.
+# ------------------------------------------------------------------------------
+rm -f "$USER_HOME/.ssh/authorized_keys"
+if as_sudo --only ssh >/tmp/rssh.log 2>&1; then
+    pass "ssh phase exits 0 without systemd"
+else
+    fail "ssh phase exited non-zero without systemd"
+    tail -15 /tmp/rssh.log | sed 's/^/    /'
+fi
+
+dropin=/etc/ssh/sshd_config.d/99-hardening.conf
+if [[ -f "$dropin" ]]; then
+    if grep -q '^PasswordAuthentication no' "$dropin"; then
+        fail "password auth disabled with no key and no tailnet (lockout risk)"
+    else
+        pass "password auth left ON when there is no other way in"
+    fi
+else
+    fail "ssh phase wrote no drop-in"
+fi
+
+# With a key present, it must harden.
+mkdir -p "$USER_HOME/.ssh"
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest test@example" > "$USER_HOME/.ssh/authorized_keys"
+chown -R "$TEST_USER:$TEST_USER" "$USER_HOME/.ssh"
+as_sudo --only ssh >/tmp/rssh2.log 2>&1
+if grep -q '^PasswordAuthentication no' "$dropin" 2>/dev/null; then
+    pass "password auth disabled once an authorized key exists"
+else
+    fail "password auth still on despite an installed key"
+fi
+
+# SSH_PUBKEY must not be appended twice.
+SSH_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdup dup@example" as_sudo --only ssh >/dev/null 2>&1
+SSH_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdup dup@example" as_sudo --only ssh >/dev/null 2>&1
+n=$(grep -cF 'dup@example' "$USER_HOME/.ssh/authorized_keys")
+(( n == 1 )) && pass "SSH_PUBKEY installed exactly once across runs" \
+             || fail "SSH_PUBKEY appears $n times (expected 1)"
+
+if as_sudo --only firewall >/tmp/rufw.log 2>&1; then
+    pass "firewall phase exits 0 with no tailnet"
+else
+    fail "firewall phase exited non-zero"
+    tail -15 /tmp/rufw.log | sed 's/^/    /'
+fi
+grep -q 'left DISABLED to avoid lockout' /tmp/rufw.log \
+    && pass "ufw left disabled while Tailscale is down" \
+    || fail "ufw was not held back despite no tailnet"
+
+# ------------------------------------------------------------------------------
+head_ "R7: legacy SKIP_* environment knobs still map onto phases"
+# ------------------------------------------------------------------------------
+if SKIP_TAILSCALE=1 SKIP_UFW=1 as_sudo --dry-run >/tmp/rskip.log 2>&1; then
+    grep -q 'Skipping:.*tailscale' /tmp/rskip.log \
+        && pass "SKIP_TAILSCALE=1 maps to --skip tailscale" \
+        || fail "SKIP_TAILSCALE=1 was ignored"
+    grep -q 'Skipping:.*firewall' /tmp/rskip.log \
+        && pass "SKIP_UFW=1 maps to --skip firewall" \
+        || fail "SKIP_UFW=1 was ignored"
+else
+    fail "run with SKIP_* knobs exited non-zero"
+    tail -10 /tmp/rskip.log | sed 's/^/    /'
+fi
+
+t_bad_input
+
+# ==============================================================================
 echo ""
 echo "=============================================="
 echo "  passed: $PASSED   failed: $FAILED"

@@ -20,6 +20,8 @@
 #   --only <phase>     run only these phases (repeatable)
 #   --list-phases      print phase names and exit
 #   --print-packages   print every package this script can install
+#   --print-checked-binaries
+#                      print every binary the verification pass ticks
 #   -h, --help         this message
 #
 # Phases: base tools desktop harden i3 polybar kitty shell wordlists
@@ -69,6 +71,14 @@ TOOL_METAS=(
 # Not guaranteed by the metapackages above, or wanted regardless.
 # ncat split out of the nmap package on current Debian/Kali; psmisc provides
 # the killall that polybar's launch.sh calls.
+#
+# The AD/web block below is here because the TOOL_METAS closure does NOT contain
+# it. Four of them (netexec, bloodhound.py, ffuf, gobuster) happen to ship in
+# kali-linux-default, so on a stock ISO they look present -- but that is the
+# ISO's doing, not ours, and it evaporates on a netinst. The other three (mitm6,
+# certipy-ad, enum4linux-ng) are absent on every install path. All seven were
+# being ticked by the verification block while nothing installed them; tests/ T9
+# now asserts that can't happen again.
 EXTRA_PKGS=(
     ncat
     psmisc
@@ -78,7 +88,17 @@ EXTRA_PKGS=(
     wget
     git
     seclists
+    wordlists
     ufw
+
+    # AD / web tooling not covered by the metapackages above
+    netexec
+    mitm6
+    certipy-ad
+    enum4linux-ng
+    bloodhound.py
+    ffuf
+    gobuster
 )
 
 # Desktop. kali-desktop-i3 is a full desktop, not just a window manager: it
@@ -108,6 +128,23 @@ DESKTOP_PKGS=(
 )
 
 readonly ALL_PHASES=(base tools desktop harden i3 polybar kitty shell wordlists)
+
+# Binaries the verification pass ticks at the end of a run. These are BINARY
+# names, not package names: certipy-ad ships /usr/bin/certipy-ad, while
+# /usr/bin/certipy belongs to python3-certipy, an unrelated cert library.
+#
+# tests/ T9 asserts every name here is actually delivered by the package set
+# above. Ticking a tool nothing installs is the failure this list caused once
+# already -- seven tools were verified and never installed, and you'd only find
+# out on the hardware.
+VERIFY_BINS_TOOLS=(
+    nmap ncat hashcat john netexec impacket-ntlmrelayx responder
+    mitm6 certipy-ad enum4linux-ng bloodhound-python proxychains4
+    aircrack-ng wifite hcxdumptool bettercap sqlmap ffuf gobuster
+)
+VERIFY_BINS_DESKTOP=(
+    i3 polybar kitty dmenu_run i3lock xss-lock Xorg
+)
 
 # Colors
 readonly RED='\033[0;31m'
@@ -245,13 +282,21 @@ apt_install_first() {
 
 # Disable and mask a systemd unit if it exists. Guarded for containers/WSL where
 # there is no systemd at all.
+# Report what actually happened. The earlier version warned on failure and then
+# unconditionally claimed success, so a unit that refused to stop logged both
+# "could not disable" and "disabled" -- and --dry-run reported units disabled
+# that were never touched.
 disable_unit() {
     local unit="$1" why="$2"
     systemctl list-unit-files "$unit" &>/dev/null || return 0
-    if systemctl cat "$unit" &>/dev/null; then
-        run systemctl disable --now "$unit" 2>/dev/null \
-            || warn "could not disable $unit"
+    systemctl cat "$unit" &>/dev/null || return 0
+
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} systemctl disable --now $unit ($why)"
+    elif systemctl disable --now "$unit" 2>/dev/null; then
         msg "disabled $unit ($why)"
+    else
+        warn "could not disable $unit ($why)"
     fi
 }
 
@@ -273,6 +318,11 @@ while (( $# )); do
         --print-packages)
                         printf '%s\n' "${TOOL_METAS[@]}" "${EXTRA_PKGS[@]}" \
                                       "${DESKTOP_PKGS[@]}"; exit 0 ;;
+        # Every binary the verification pass ticks. T9 cross-checks these
+        # against the install closure of --print-packages.
+        --print-checked-binaries)
+                        printf '%s\n' "${VERIFY_BINS_TOOLS[@]}" \
+                                      "${VERIFY_BINS_DESKTOP[@]}"; exit 0 ;;
         -h|--help)      usage ;;
         *)              err "unknown option: $1"; err "try --help"; exit 1 ;;
     esac
@@ -502,7 +552,14 @@ if should_run i3; then
     phase "Phase: i3"
 
     I3_DIR="$USER_HOME/.config/i3"
-    [[ -f "$I3_DIR/config" ]] && run cp "$I3_DIR/config" "$I3_DIR/config.backup"
+
+    # Back up only what we didn't write. Copying unconditionally meant the second
+    # run overwrote the backup with our own generated config, so the original was
+    # recoverable exactly once.
+    if [[ -f "$I3_DIR/config" && ! -f "$I3_DIR/config.backup" ]]; then
+        run cp "$I3_DIR/config" "$I3_DIR/config.backup"
+        msg "backed up the existing i3 config to config.backup"
+    fi
 
     write_file "$I3_DIR/config" <<'I3CONFIG'
 # i3 config -- kali-deploy-physical
@@ -924,15 +981,13 @@ check() {
 
 echo ""
 echo "Tools:"
-for c in nmap ncat hashcat john netexec impacket-ntlmrelayx responder \
-         mitm6 certipy enum4linux-ng bloodhound-python proxychains4 \
-         aircrack-ng wifite hcxdumptool bettercap sqlmap ffuf gobuster; do
+for c in "${VERIFY_BINS_TOOLS[@]}"; do
     check "$c"
 done
 
 echo ""
 echo "Desktop:"
-for c in i3 polybar kitty dmenu_run i3lock xss-lock Xorg; do
+for c in "${VERIFY_BINS_DESKTOP[@]}"; do
     check "$c"
 done
 

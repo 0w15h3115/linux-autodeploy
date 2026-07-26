@@ -1,18 +1,15 @@
 #!/bin/bash
 
-# Kali Headless Security Tools Deploy Script (kali-deploy-remote)
+# Kali Headless Deploy Script (kali-deploy-remote)
 #
-# A reimagining of the Ubuntu v5 recipe for a *headless* Kali box you reach
-# from anywhere over Tailscale + SSH, with tmux for multiple terminal windows.
+# A headless Kali box you reach from anywhere over Tailscale + SSH, with tmux as
+# the multi-window interface. No GUI: there is no display on a headless box, so
+# i3 / polybar / kitty are dropped entirely.
 #
-# Deliberately NOT installed: i3 / polybar / kitty GUI. There is no display on a
-# headless box, so the graphical window manager is dropped entirely. tmux is the
-# multi-window interface; zsh is carried over from v5 because it's terminal-side.
-#
-# Installs (all from native Kali apt repos — no /opt venv, no from-source builds):
+# Installs (native Kali apt only -- no /opt venv, no from-source builds):
 #   nmap/ncat, binwalk, smbclient, hashcat, proxychains4, dns tools, nbtscan,
 #   enum4linux(-ng), impacket-scripts, netexec, responder, mitm6, certipy-ad,
-#   bloodhound.py, seclists, wordlists, java (headless), zsh+oh-my-zsh, tmux
+#   bloodhound.py, seclists, wordlists, java (headless), tmux
 #
 # Access layer:
 #   - Tailscale (WireGuard mesh; no public port exposure)
@@ -20,20 +17,37 @@
 #     handled for you), with a hardened OpenSSH as fallback
 #   - ufw: default-deny inbound, allow only over the tailscale0 interface
 #
-# Runtime knobs (all optional environment variables):
-#   TS_AUTHKEY          reusable Tailscale auth key -> unattended join.
-#                       If unset, the script falls back to interactive login.
+# Usage:
+#   sudo ./kali-deploy-remote [options]
+#
+#   --dry-run          show what would happen; change nothing
+#   --skip <phase>     skip a phase (repeatable)
+#   --only <phase>     run only these phases (repeatable)
+#   --list-phases      print phase names and exit
+#   --print-packages   print every package this script can install
+#   --print-checked-binaries
+#                      print every binary the verification pass ticks
+#   -h, --help         this message
+#
+# Phases: base tools tailscale ssh firewall tmux shell wordlists
+#
+# Environment knobs (all optional):
+#   TS_AUTHKEY          reusable Tailscale auth key -> unattended join. If unset,
+#                       the script falls back to interactive login.
 #   TS_ADVERTISE_TAGS   e.g. "tag:server,tag:kali" -> lands the node with ACL
 #                       tags automatically (scales to many boxes).
-#   SSH_PUBKEY          an authorized public key to install for the OpenSSH
-#                       fallback path (e.g. "ssh-ed25519 AAAA... you@host").
-#   SKIP_TAILSCALE=1    don't touch Tailscale (you'll join it yourself).
-#   SKIP_UFW=1          don't configure/enable the firewall.
+#   SSH_PUBKEY          an authorized public key for the OpenSSH fallback path
+#                       (e.g. "ssh-ed25519 AAAA... you@host").
+#   SKIP_TAILSCALE=1    same as --skip tailscale (kept for older invocations).
+#   SKIP_UFW=1          same as --skip firewall.
 #
-# Design notes: like v5, an installer should keep going when an optional piece
-# fails rather than aborting. We keep -u and pipefail but not -e, make every
-# fallible step tolerant, and guard the lockout-prone steps (SSH hardening, ufw)
-# so a box whose Tailscale/keys didn't come up is never cut off from itself.
+# Design notes: an installer should keep going when an optional piece fails
+# rather than aborting. We keep -u and pipefail but NOT -e, make every fallible
+# step tolerant, and guard the lockout-prone steps (SSH hardening, ufw) so a box
+# whose Tailscale or keys didn't come up is never cut off from itself. Every
+# phase is idempotent, so a run that dies partway can be resumed by running it
+# again. A full transcript goes to /var/log -- this is the box you cannot watch,
+# so the transcript is the only diagnosis you get.
 
 set -uo pipefail
 
@@ -42,17 +56,91 @@ set -uo pipefail
 # ------------------------------------------------------------------------------
 
 readonly WORDLIST_DIR="/usr/share/wordlists"
+readonly ZSHRC_MARKER="# >>> kali-deploy-remote >>>"
+readonly ZSHRC_END_MARKER="# <<< kali-deploy-remote <<<"
 
 # Tailscale's apt repo is published per Debian codename. Kali rolling tracks
 # Debian testing, but the 'bookworm' (Debian 12 stable) channel is the
 # community-standard, compatible choice for Kali and doesn't churn.
 readonly TS_DEBIAN_CODENAME="bookworm"
 
+# Everything this script installs from Kali's repos. Kept as one array so
+# --print-packages can hand it to the test harness and the two can never drift.
+PKGS=(
+    curl
+    wget
+    git
+    jq
+    unzip
+    ca-certificates
+    gnupg
+    python3
+    python3-pip
+    pipx
+
+    zsh
+    tmux
+    openssh-server
+    ufw
+    iproute2
+
+    nmap
+    ncat
+    binwalk
+    smbclient
+    hashcat
+    proxychains4
+    # dnsutils was renamed bind9-dnsutils; the old name has no candidate on
+    # current Kali, so this quietly installed nothing and left the box without
+    # dig or nslookup. Caught by tests/ T1.
+    bind9-dnsutils
+    dnsrecon
+    dnsenum
+    nbtscan
+    enum4linux
+    enum4linux-ng
+
+    python3-impacket
+    impacket-scripts
+    netexec
+    responder
+    mitm6
+    certipy-ad
+    bloodhound.py
+
+    seclists
+    wordlists
+)
+
+readonly ALL_PHASES=(base tools tailscale ssh firewall tmux shell wordlists)
+
+# Binaries the verification pass ticks at the end of a run. BINARY names, not
+# package names -- certipy-ad ships /usr/bin/certipy-ad, while /usr/bin/certipy
+# belongs to python3-certipy, an unrelated cert library, so the old `check
+# certipy` printed a red X even on a perfectly good install.
+#
+# tests/ T9 asserts every name here is delivered by PKGS above. `tailscale` is
+# the one deliberate exception: it comes from Tailscale's own apt repo, not
+# Kali's, and the test knows that.
+VERIFY_BINS_TOOLS=(
+    nmap ncat binwalk smbclient hashcat proxychains4 dig enum4linux
+    enum4linux-ng netexec responder mitm6 certipy-ad bloodhound-python
+    impacket-ntlmrelayx
+)
+VERIFY_BINS_ACCESS=(
+    tmux zsh sshd tailscale
+)
+
 # Colors
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'
+
+DRY_RUN=0
+SKIP_PHASES=()
+ONLY_PHASES=()
 
 # ------------------------------------------------------------------------------
 # Helper Functions
@@ -60,9 +148,18 @@ readonly NC='\033[0m'
 
 # warn/err go to stderr so they don't get captured by $(...) command
 # substitutions (e.g. get_real_user) and so they're visible on the error path.
-msg()     { echo -e "${GREEN}[+]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[*]${NC} $1" >&2; }
-err()     { echo -e "${RED}[!]${NC} $1" >&2; }
+msg()   { echo -e "${GREEN}[+]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[*]${NC} $1" >&2; }
+err()   { echo -e "${RED}[!]${NC} $1" >&2; }
+phase() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
+
+# Help text is the header comment block itself. Read it structurally -- from
+# line 3 to the first line that isn't a comment -- rather than by hardcoded line
+# numbers, so editing the header can't leak code into --help.
+usage() {
+    awk 'NR>2 { if (/^#/) { sub(/^# ?/, ""); print } else { exit } }' "$0"
+    exit 0
+}
 
 get_real_user() {
     if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
@@ -78,13 +175,56 @@ get_user_home() {
     getent passwd "$1" | cut -d: -f6
 }
 
-run_as_user() {
-    local user="$1"
-    shift
-    su - "$user" -c "$*"
+# Every mutating command goes through run() so --dry-run is honoured in one
+# place rather than being sprinkled through each phase.
+run() {
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} $*"
+        return 0
+    fi
+    "$@"
 }
 
-# True if apt has an installation candidate for the package on THIS release.
+# Write a heredoc to a file, honouring --dry-run. Reads content from stdin.
+write_file() {
+    local dst="$1" mode="${2:-}"
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} write $dst"
+        cat >/dev/null
+        return 0
+    fi
+    mkdir -p "$(dirname "$dst")"
+    cat > "$dst" || { err "could not write $dst"; return 1; }
+    [[ -n "$mode" ]] && chmod "$mode" "$dst"
+    return 0
+}
+
+# Copy a file aside once, the first time we are about to replace it. Copying
+# unconditionally would mean the second run overwrites the backup with our own
+# generated content, leaving the original recoverable exactly once.
+backup_once() {
+    local f="$1"
+    [[ -f "$f" && ! -f "$f.backup" ]] || return 0
+    run cp "$f" "$f.backup" && msg "backed up $(basename "$f") to $(basename "$f").backup"
+}
+
+should_run() {
+    local p="$1" x
+    if (( ${#ONLY_PHASES[@]} )); then
+        for x in "${ONLY_PHASES[@]}"; do [[ "$x" == "$p" ]] && return 0; done
+        return 1
+    fi
+    for x in "${SKIP_PHASES[@]}"; do [[ "$x" == "$p" ]] && return 1; done
+    return 0
+}
+
+is_phase() {
+    local p="$1" x
+    for x in "${ALL_PHASES[@]}"; do [[ "$x" == "$p" ]] && return 0; done
+    return 1
+}
+
+# True if apt has an installation candidate for the package on THIS system.
 # Lets us skip packages that were renamed/removed instead of aborting the batch.
 apt_available() {
     local cand
@@ -93,8 +233,14 @@ apt_available() {
 }
 
 # Install a list of apt packages, falling back to one-by-one so that a single
-# unavailable package doesn't take down the entire batch.
+# unavailable package doesn't take down the entire batch. In the fallback we
+# probe availability first so a removed/renamed package is a clean skip.
 apt_install() {
+    (( $# )) || return 0
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} apt-get install -y $*"
+        return 0
+    fi
     if apt-get install -y "$@"; then
         return 0
     fi
@@ -103,26 +249,65 @@ apt_install() {
         if apt_available "$pkg"; then
             apt-get install -y "$pkg" || warn "Could not install '$pkg' (skipping)"
         else
-            warn "Package '$pkg' not available on this release (skipping)"
+            warn "Package '$pkg' not available on this system (skipping)"
         fi
     done
 }
 
-# Install the FIRST package from the list that this release actually offers.
+# Install the FIRST package from the list that this system actually offers.
 apt_install_first() {
     local label="$1"; shift
     local pkg
     for pkg in "$@"; do
         if apt_available "$pkg"; then
+            if (( DRY_RUN )); then
+                echo -e "${YELLOW}[dry-run]${NC} $label: would install '$pkg'"
+                return 0
+            fi
             if apt-get install -y "$pkg"; then
                 msg "$label: installed '$pkg'"
                 return 0
             fi
         fi
     done
-    warn "$label: none of [$*] are available on this release (skipping)"
+    warn "$label: none of [$*] are available (skipping)"
     return 1
 }
+
+# ------------------------------------------------------------------------------
+# Argument parsing
+# ------------------------------------------------------------------------------
+
+while (( $# )); do
+    case "$1" in
+        --dry-run)      DRY_RUN=1; shift ;;
+        --skip)         [[ -n "${2:-}" ]] || { err "--skip needs a phase"; exit 1; }
+                        SKIP_PHASES+=("$2"); shift 2 ;;
+        --only)         [[ -n "${2:-}" ]] || { err "--only needs a phase"; exit 1; }
+                        ONLY_PHASES+=("$2"); shift 2 ;;
+        --list-phases)  printf '%s\n' "${ALL_PHASES[@]}"; exit 0 ;;
+        # Every package name this script can install, one per line. The test
+        # harness reads its package list from here so it can never drift out of
+        # sync with the array above.
+        --print-packages)
+                        printf '%s\n' "${PKGS[@]}"; exit 0 ;;
+        # Every binary the verification pass ticks. T9 cross-checks these
+        # against the install closure of --print-packages.
+        --print-checked-binaries)
+                        printf '%s\n' "${VERIFY_BINS_TOOLS[@]}" \
+                                      "${VERIFY_BINS_ACCESS[@]}"; exit 0 ;;
+        -h|--help)      usage ;;
+        *)              err "unknown option: $1"; err "try --help"; exit 1 ;;
+    esac
+done
+
+# The older SKIP_* environment knobs map onto the phase model.
+[[ "${SKIP_TAILSCALE:-0}" == "1" ]] && SKIP_PHASES+=(tailscale)
+[[ "${SKIP_UFW:-0}"       == "1" ]] && SKIP_PHASES+=(firewall)
+
+for p in "${SKIP_PHASES[@]}" "${ONLY_PHASES[@]}"; do
+    is_phase "$p" || { err "unknown phase: $p"; err "valid: ${ALL_PHASES[*]}"; exit 1; }
+done
 
 # ------------------------------------------------------------------------------
 # Pre-flight Checks
@@ -143,98 +328,133 @@ if [[ -z "$REAL_USER" || -z "$USER_HOME" ]]; then
     exit 1
 fi
 
-msg "Deploying headless Kali toolkit for user: $REAL_USER"
-msg "User home directory: $USER_HOME"
+LOGFILE="/var/log/kali-deploy-remote-$(date +%Y%m%d-%H%M%S).log"
+if (( ! DRY_RUN )); then
+    exec > >(tee -a "$LOGFILE") 2>&1
+fi
 
-# ------------------------------------------------------------------------------
-# Phase 1: System + Security Packages (apt)
-# ------------------------------------------------------------------------------
+phase "Pre-flight"
+msg "User:      $REAL_USER ($USER_HOME)"
+(( DRY_RUN )) && msg "Mode:      DRY RUN (nothing will be changed)" \
+              || msg "Log:       $LOGFILE"
 
-msg "Updating package lists..."
-apt-get update || true
-
-msg "Installing packages from Kali repos..."
-apt_install \
-    curl \
-    wget \
-    git \
-    jq \
-    unzip \
-    ca-certificates \
-    gnupg \
-    python3 \
-    python3-pip \
-    pipx \
-    \
-    zsh \
-    tmux \
-    openssh-server \
-    ufw \
-    \
-    nmap \
-    ncat \
-    binwalk \
-    smbclient \
-    hashcat \
-    proxychains4 \
-    net-tools \
-    dnsutils \
-    dnsrecon \
-    dnsenum \
-    nbtscan \
-    enum4linux \
-    enum4linux-ng \
-    \
-    python3-impacket \
-    impacket-scripts \
-    netexec \
-    responder \
-    mitm6 \
-    certipy-ad \
-    bloodhound.py \
-    \
-    seclists \
-    wordlists
-
-# Java runtime (headless — no GUI deps). default-jre-headless tracks the current
-# default JDK; the explicit names are only fallbacks.
-apt_install_first "Java runtime (headless)" \
-    default-jre-headless \
-    openjdk-21-jre-headless \
-    openjdk-17-jre-headless
-
-# ------------------------------------------------------------------------------
-# Phase 2: Tailscale (network layer)
-# ------------------------------------------------------------------------------
-
-if [[ "${SKIP_TAILSCALE:-0}" == "1" ]]; then
-    warn "SKIP_TAILSCALE=1 set — not installing or joining Tailscale"
+# Advisory, not fatal. /etc/os-release on kali-rolling has ID=kali but NO
+# VERSION_ID, so never branch on version: under `set -u` that is a crash.
+distro_id="$(. /etc/os-release 2>/dev/null && echo "${ID:-unknown}")"
+if [[ "$distro_id" != "kali" ]]; then
+    warn "This does not look like Kali (ID=$distro_id)."
+    warn "Continuing anyway -- every package is probed before install."
 else
-    msg "Installing Tailscale..."
-    if ! command -v tailscale &>/dev/null; then
-        mkdir -p /usr/share/keyrings
-        # Add Tailscale's signed apt repo (bookworm channel; see note above).
-        if curl -fsSL "https://pkgs.tailscale.com/stable/debian/${TS_DEBIAN_CODENAME}.noarmor.gpg" \
-                -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
-           && curl -fsSL "https://pkgs.tailscale.com/stable/debian/${TS_DEBIAN_CODENAME}.tailscale-keyring.list" \
-                -o /etc/apt/sources.list.d/tailscale.list; then
-            apt-get update || true
-            apt-get install -y tailscale || warn "Tailscale apt install failed"
-        else
-            warn "Could not add Tailscale repo (will try the official install script)"
-        fi
+    msg "Distro:    Kali"
+fi
 
-        # Fall back to the official installer if the apt path didn't land the
-        # binary — covers both a failed repo add and a repo that resolved but
-        # had no installable 'tailscale' candidate on this release.
-        if ! command -v tailscale &>/dev/null; then
-            warn "Trying Tailscale's official install script..."
-            curl -fsSL https://tailscale.com/install.sh | sh || warn "Tailscale install failed"
+(( ${#SKIP_PHASES[@]} )) && msg "Skipping:  ${SKIP_PHASES[*]}"
+(( ${#ONLY_PHASES[@]} )) && msg "Only:      ${ONLY_PHASES[*]}"
+
+# ------------------------------------------------------------------------------
+# Phase: base -- apt update / full-upgrade, debconf pre-seed
+# ------------------------------------------------------------------------------
+
+if should_run base; then
+    phase "Phase: base"
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    msg "Updating package lists..."
+    run apt-get update || warn "apt-get update reported errors (continuing)"
+
+    # Kali is a rolling release: `upgrade` can hold back packages and leave a
+    # partially-upgraded system. full-upgrade is the supported path.
+    #
+    # confdef/confold keep existing config files without asking. That matters
+    # more here than on the laptop: this box is reached over SSH, and a conffile
+    # prompt on /etc/ssh/sshd_config would hang the run with nobody at the
+    # console to answer it.
+    msg "Full-upgrading (rolling release; 'upgrade' is not safe here)..."
+    run apt-get -y \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        full-upgrade || warn "full-upgrade reported errors (continuing)"
+
+    # Pre-seed the Kali packages that ask debconf questions. None are in PKGS
+    # today, but they arrive as dependencies as the tool list grows, and an
+    # unattended headless run has nobody to answer a prompt -- it just hangs.
+    # The safe answer to all of them is "no".
+    msg "Pre-seeding debconf (prevents interactive hangs mid-install)..."
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} debconf-set-selections <<< (wireshark/kismet/macchanger)"
+    else
+        debconf-set-selections <<'PRESEED' || warn "debconf pre-seed failed"
+wireshark-common wireshark-common/install-setuid boolean false
+kismet kismet/install-setuid boolean false
+kismet kismet/install-users string
+macchanger macchanger/automatically_run boolean false
+PRESEED
+    fi
+fi
+
+# ------------------------------------------------------------------------------
+# Phase: tools
+# ------------------------------------------------------------------------------
+
+if should_run tools; then
+    phase "Phase: tools"
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    msg "Installing ${#PKGS[@]} packages from the Kali repos..."
+    apt_install "${PKGS[@]}"
+
+    # Headless: no GUI deps. default-jre-headless tracks the current default
+    # JDK; the explicit names are only fallbacks.
+    apt_install_first "Java runtime (headless)" \
+        default-jre-headless \
+        openjdk-21-jre-headless \
+        openjdk-17-jre-headless
+fi
+
+# ------------------------------------------------------------------------------
+# Phase: tailscale -- network layer
+# ------------------------------------------------------------------------------
+
+if should_run tailscale; then
+    phase "Phase: tailscale"
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    if ! command -v tailscale &>/dev/null; then
+        msg "Installing Tailscale..."
+        run mkdir -p /usr/share/keyrings
+        # Tailscale's signed apt repo (bookworm channel; see note above). This is
+        # the one third-party repo in either script, and it is deliberate: there
+        # is no tailscale package in Kali.
+        if (( DRY_RUN )); then
+            echo -e "${YELLOW}[dry-run]${NC} add Tailscale apt repo + install tailscale"
+        else
+            if curl -fsSL "https://pkgs.tailscale.com/stable/debian/${TS_DEBIAN_CODENAME}.noarmor.gpg" \
+                    -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+               && curl -fsSL "https://pkgs.tailscale.com/stable/debian/${TS_DEBIAN_CODENAME}.tailscale-keyring.list" \
+                    -o /etc/apt/sources.list.d/tailscale.list; then
+                apt-get update || true
+                apt-get install -y tailscale || warn "Tailscale apt install failed"
+            else
+                warn "Could not add Tailscale repo (will try the official install script)"
+            fi
+
+            # Fall back to the official installer if the apt path didn't land the
+            # binary -- covers both a failed repo add and a repo that resolved but
+            # had no installable 'tailscale' candidate.
+            if ! command -v tailscale &>/dev/null; then
+                warn "Trying Tailscale's official install script..."
+                curl -fsSL https://tailscale.com/install.sh | sh \
+                    || warn "Tailscale install failed"
+            fi
         fi
+    else
+        msg "Tailscale already installed"
     fi
 
-    # Bring the daemon up (best-effort; systemd may be absent in some environments).
-    systemctl enable --now tailscaled 2>/dev/null \
+    run systemctl enable --now tailscaled 2>/dev/null \
         || warn "Could not enable tailscaled via systemd (start it manually if needed)"
 
     if command -v tailscale &>/dev/null; then
@@ -246,54 +466,63 @@ else
 
         if [[ -n "${TS_AUTHKEY:-}" ]]; then
             msg "Joining tailnet with provided auth key (unattended)..."
-            tailscale up "${TS_UP_FLAGS[@]}" --authkey="${TS_AUTHKEY}" \
+            run tailscale up "${TS_UP_FLAGS[@]}" --authkey="${TS_AUTHKEY}" \
                 || warn "tailscale up failed (check the auth key / its expiry & tags)"
         else
-            msg "No TS_AUTHKEY set — starting interactive login."
+            msg "No TS_AUTHKEY set -- starting interactive login."
             warn "Open the URL below in a browser to authorize this machine:"
-            tailscale up "${TS_UP_FLAGS[@]}" \
+            run tailscale up "${TS_UP_FLAGS[@]}" \
                 || warn "tailscale up did not complete (re-run: sudo tailscale up --ssh)"
         fi
 
         msg "Reminder: Tailscale SSH also requires an ACL rule granting SSH to"
-        msg "this node in your tailnet policy (admin console → Access Controls)."
+        msg "this node in your tailnet policy (admin console -> Access Controls)."
     fi
 fi
 
-# ------------------------------------------------------------------------------
-# Phase 3: OpenSSH hardening (fallback path) + install optional pubkey
-# ------------------------------------------------------------------------------
-
-msg "Hardening OpenSSH (fallback to Tailscale SSH)..."
-
-# Install a provided public key so the OpenSSH fallback has a way in.
-if [[ -n "${SSH_PUBKEY:-}" ]]; then
-    SSH_DIR="$USER_HOME/.ssh"
-    mkdir -p "$SSH_DIR"
-    touch "$SSH_DIR/authorized_keys"
-    if ! grep -qxF "$SSH_PUBKEY" "$SSH_DIR/authorized_keys"; then
-        echo "$SSH_PUBKEY" >> "$SSH_DIR/authorized_keys"
-        msg "Installed SSH_PUBKEY into $SSH_DIR/authorized_keys"
-    fi
-    chmod 700 "$SSH_DIR"
-    chmod 600 "$SSH_DIR/authorized_keys"
-    chown -R "$REAL_USER:$REAL_USER" "$SSH_DIR"
-fi
-
-# Decide whether it's safe to turn OFF password auth. It is safe if the user has
-# an authorized key, OR if Tailscale SSH is already up (guaranteed way back in).
-# Otherwise we'd risk locking the box out of itself, so we keep passwords on.
-have_authorized_key=false
-[[ -s "$USER_HOME/.ssh/authorized_keys" ]] && have_authorized_key=true
+# Whether Tailscale is actually up gates both the SSH and firewall phases below,
+# so it is computed once here rather than inside either.
 tailscale_up=false
-tailscale status &>/dev/null && tailscale_up=true
+command -v tailscale &>/dev/null && tailscale status &>/dev/null && tailscale_up=true
 
-SSHD_DROPIN="/etc/ssh/sshd_config.d/99-hardening.conf"
-mkdir -p /etc/ssh/sshd_config.d
+# ------------------------------------------------------------------------------
+# Phase: ssh -- OpenSSH hardening (fallback path) + optional pubkey
+# ------------------------------------------------------------------------------
 
-if $have_authorized_key || $tailscale_up; then
-    cat > "$SSHD_DROPIN" << 'SSHD'
-# Managed by kali-deploy-remote — hardened OpenSSH (fallback to Tailscale SSH)
+if should_run ssh; then
+    phase "Phase: ssh"
+
+    # Install a provided public key so the OpenSSH fallback has a way in.
+    if [[ -n "${SSH_PUBKEY:-}" ]]; then
+        SSH_DIR="$USER_HOME/.ssh"
+        if (( DRY_RUN )); then
+            echo -e "${YELLOW}[dry-run]${NC} install SSH_PUBKEY into $SSH_DIR/authorized_keys"
+        else
+            mkdir -p "$SSH_DIR"
+            touch "$SSH_DIR/authorized_keys"
+            if grep -qxF "$SSH_PUBKEY" "$SSH_DIR/authorized_keys"; then
+                msg "SSH_PUBKEY already present in authorized_keys"
+            else
+                echo "$SSH_PUBKEY" >> "$SSH_DIR/authorized_keys"
+                msg "Installed SSH_PUBKEY into $SSH_DIR/authorized_keys"
+            fi
+            chmod 700 "$SSH_DIR"
+            chmod 600 "$SSH_DIR/authorized_keys"
+            chown -R "$REAL_USER:$REAL_USER" "$SSH_DIR"
+        fi
+    fi
+
+    # Decide whether it's safe to turn OFF password auth. It is safe if the user
+    # has an authorized key, OR if Tailscale SSH is already up (guaranteed way
+    # back in). Otherwise we'd risk locking the box out of itself.
+    have_authorized_key=false
+    [[ -s "$USER_HOME/.ssh/authorized_keys" ]] && have_authorized_key=true
+
+    SSHD_DROPIN="/etc/ssh/sshd_config.d/99-hardening.conf"
+
+    if $have_authorized_key || $tailscale_up; then
+        write_file "$SSHD_DROPIN" <<'SSHD'
+# Managed by kali-deploy-remote -- hardened OpenSSH (fallback to Tailscale SSH)
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -301,64 +530,76 @@ PubkeyAuthentication yes
 X11Forwarding no
 AllowAgentForwarding no
 SSHD
-    msg "OpenSSH: password auth DISABLED (key/Tailscale access confirmed)"
-else
-    cat > "$SSHD_DROPIN" << 'SSHD'
-# Managed by kali-deploy-remote — partial hardening only.
+        msg "OpenSSH: password auth DISABLED (key/Tailscale access confirmed)"
+    else
+        write_file "$SSHD_DROPIN" <<'SSHD'
+# Managed by kali-deploy-remote -- partial hardening only.
 # Password auth left ENABLED because no SSH key was installed and Tailscale was
-# not up at deploy time — disabling it would risk locking you out. Install a key
+# not up at deploy time -- disabling it would risk locking you out. Install a key
 # (re-run with SSH_PUBKEY=...) or bring up Tailscale, then re-run to fully harden.
 PermitRootLogin no
 X11Forwarding no
 AllowAgentForwarding no
 SSHD
-    warn "OpenSSH: NO key installed and Tailscale not up — leaving password auth ON"
-    warn "Re-run with SSH_PUBKEY='ssh-ed25519 ...' (or after Tailscale is up) to fully harden"
-fi
+        warn "OpenSSH: NO key installed and Tailscale not up -- leaving password auth ON"
+        warn "Re-run with SSH_PUBKEY='ssh-ed25519 ...' (or after Tailscale is up) to fully harden"
+    fi
 
-systemctl enable ssh 2>/dev/null || warn "Could not enable ssh service via systemd"
-# Reload (not restart) so the current session is never dropped.
-if sshd -t 2>/dev/null; then
-    systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null \
-        || warn "Could not reload sshd; apply manually"
-else
-    warn "sshd config test failed — NOT reloading (check $SSHD_DROPIN)"
-fi
+    run systemctl enable ssh 2>/dev/null || warn "Could not enable ssh service via systemd"
 
-# ------------------------------------------------------------------------------
-# Phase 4: Firewall (ufw) — inbound only over the tailnet
-# ------------------------------------------------------------------------------
-
-if [[ "${SKIP_UFW:-0}" == "1" ]]; then
-    warn "SKIP_UFW=1 set — not configuring the firewall"
-elif ! command -v ufw &>/dev/null; then
-    warn "ufw not installed — skipping firewall configuration"
-else
-    msg "Configuring ufw (default-deny inbound; allow the tailscale0 interface)..."
-    ufw default deny incoming || true
-    ufw default allow outgoing || true
-    ufw allow in on tailscale0 || true
-
-    # Only ENABLE the firewall if Tailscale is up — otherwise a box whose only
-    # current access is a non-tailnet SSH session could be cut off. ufw permits
-    # already-established connections, but new non-tailnet logins would be denied.
-    if $tailscale_up; then
-        ufw --force enable || warn "Could not enable ufw"
-        msg "ufw enabled — inbound allowed only over tailscale0"
+    # Reload (not restart) so the current session is never dropped, and only
+    # after sshd validates the config -- a bad drop-in that gets reloaded takes
+    # the box with it.
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} sshd -t && systemctl reload ssh"
+    elif sshd -t 2>/dev/null; then
+        systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null \
+            || warn "Could not reload sshd; apply manually"
     else
-        warn "Tailscale not up — rules staged but ufw left DISABLED to avoid lockout"
-        warn "Once on the tailnet, enable with: sudo ufw --force enable"
+        warn "sshd config test failed -- NOT reloading (check $SSHD_DROPIN)"
     fi
 fi
 
 # ------------------------------------------------------------------------------
-# Phase 5: tmux configuration
+# Phase: firewall -- inbound only over the tailnet
 # ------------------------------------------------------------------------------
 
-msg "Configuring tmux..."
+if should_run firewall; then
+    phase "Phase: firewall"
 
-cat > "$USER_HOME/.tmux.conf" << 'TMUX'
-# ~/.tmux.conf — kali-deploy-remote (headless multi-window over SSH)
+    if ! command -v ufw &>/dev/null; then
+        warn "ufw not installed -- skipping firewall configuration"
+    else
+        msg "Configuring ufw (default-deny inbound; allow the tailscale0 interface)..."
+        run ufw default deny incoming  || warn "ufw: could not set default deny incoming"
+        run ufw default allow outgoing || warn "ufw: could not set default allow outgoing"
+        run ufw allow in on tailscale0 || warn "ufw: could not allow tailscale0"
+
+        # Only ENABLE the firewall if Tailscale is up -- otherwise a box whose
+        # only current access is a non-tailnet SSH session could be cut off. ufw
+        # permits already-established connections, but new non-tailnet logins
+        # would be denied.
+        if $tailscale_up; then
+            run ufw --force enable || warn "Could not enable ufw"
+            msg "ufw enabled -- inbound allowed only over tailscale0"
+        else
+            warn "Tailscale not up -- rules staged but ufw left DISABLED to avoid lockout"
+            warn "Once on the tailnet, enable with: sudo ufw --force enable"
+        fi
+    fi
+fi
+
+# ------------------------------------------------------------------------------
+# Phase: tmux
+# ------------------------------------------------------------------------------
+
+if should_run tmux; then
+    phase "Phase: tmux"
+
+    backup_once "$USER_HOME/.tmux.conf"
+
+    write_file "$USER_HOME/.tmux.conf" <<'TMUX'
+# ~/.tmux.conf -- kali-deploy-remote (headless multi-window over SSH)
 # Prefix stays the default Ctrl-b so every tutorial you read matches.
 
 # Quality of life
@@ -403,174 +644,200 @@ setw -g window-status-current-format " #I:#W "
 setw -g window-status-format " #I:#W "
 TMUX
 
-chown "$REAL_USER:$REAL_USER" "$USER_HOME/.tmux.conf"
-
-# ------------------------------------------------------------------------------
-# Phase 6: Shell configuration (Zsh + Oh My Zsh)
-# ------------------------------------------------------------------------------
-
-msg "Configuring Zsh..."
-
-# Kali already defaults new users to zsh, but ensure it for this user.
-chsh -s /usr/bin/zsh "$REAL_USER" 2>/dev/null || warn "Could not set default shell to zsh"
-
-# Install Oh My Zsh for the user (backs up Kali's default .zshrc first).
-if [[ ! -d "$USER_HOME/.oh-my-zsh" ]]; then
-    [[ -f "$USER_HOME/.zshrc" ]] && cp "$USER_HOME/.zshrc" "$USER_HOME/.zshrc.kali-default"
-    msg "Installing Oh My Zsh..."
-    run_as_user "$REAL_USER" '
-        export RUNZSH=no CHSH=no KEEP_ZSHRC=no
-        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    ' || {
-        warn "Oh My Zsh install script failed, trying direct clone..."
-        git clone --depth 1 https://github.com/ohmyzsh/ohmyzsh.git "$USER_HOME/.oh-my-zsh"
-        cp "$USER_HOME/.oh-my-zsh/templates/zshrc.zsh-template" "$USER_HOME/.zshrc"
-        chown -R "$REAL_USER:$REAL_USER" "$USER_HOME/.oh-my-zsh" "$USER_HOME/.zshrc"
-    }
+    run chown "$REAL_USER:$REAL_USER" "$USER_HOME/.tmux.conf"
+    msg "tmux config written to $USER_HOME/.tmux.conf"
 fi
 
-if [[ -f "$USER_HOME/.zshrc" ]]; then
-    cp "$USER_HOME/.zshrc" "$USER_HOME/.zshrc.backup"
+# ------------------------------------------------------------------------------
+# Phase: shell -- append to Kali's zsh, don't replace it
+# ------------------------------------------------------------------------------
 
-    sed -i 's/ZSH_THEME="robbyrussell"/ZSH_THEME="agnoster"/' "$USER_HOME/.zshrc"
-    sed -i 's/plugins=(git)/plugins=(git docker python pip nmap ssh-agent sudo tmux colored-man-pages command-not-found extract z)/' "$USER_HOME/.zshrc"
+if should_run shell; then
+    phase "Phase: shell"
 
-    cat >> "$USER_HOME/.zshrc" << 'ZSHRC'
+    # Kali already ships a tuned zsh (syntax highlighting, autosuggestions, a
+    # good prompt) and makes it the default shell. We append a marker-guarded
+    # block rather than installing Oh My Zsh over the top.
+    #
+    # This used to install OMZ and switch to the agnoster theme. Two reasons it
+    # is gone: agnoster needs powerline glyphs in the *client's* terminal, so
+    # over SSH from anything unconfigured it renders as boxes; and the
+    # `sed 's/ZSH_THEME="robbyrussell"/.../'` that set it only matches the OMZ
+    # template, so against Kali's own zshrc it silently did nothing.
+    ZSHRC="$USER_HOME/.zshrc"
 
-# --- Security Tools Configuration (kali-deploy-remote) ---
+    if [[ ! -f "$ZSHRC" ]]; then
+        warn "$ZSHRC does not exist -- creating one"
+        run touch "$ZSHRC"
+        run chown "$REAL_USER:$REAL_USER" "$ZSHRC"
+    fi
 
-export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    if grep -qF "$ZSHRC_MARKER" "$ZSHRC" 2>/dev/null; then
+        msg "zshrc block already present (idempotent -- leaving it alone)"
+    elif (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} append config block to $ZSHRC"
+    else
+        backup_once "$ZSHRC"
+        cat >> "$ZSHRC" <<ZSHRC_BLOCK
 
-# Aliases - Security
+$ZSHRC_MARKER
+# Added by kali-deploy-remote. Delete this block (through the closing
+# marker) to remove. Kali's own zsh config above is untouched.
+
+export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH"
+
+# Wordlists
+export WORDLISTS="/usr/share/wordlists"
+export SECLISTS="/usr/share/seclists"
+export ROCKYOU="/usr/share/wordlists/rockyou.txt"
+
+# Security
 alias nse='ls /usr/share/nmap/scripts/ | grep'
 alias serve='python3 -m http.server'
 
-# Aliases - Proxychains
+# Proxychains
 alias pchains='proxychains4'
 alias pc='proxychains4'
 
-# Aliases - Network
-alias ports='netstat -tulanp'
-alias listening='netstat -tlnp'
+# Network
+alias ports='ss -tulanp'
+alias listening='ss -tlnp'
 alias myip='curl -s ifconfig.me'
 alias tsip='tailscale ip -4'          # this box's tailnet IP
 
-# Aliases - tmux (multi-window over SSH)
+# tmux (multi-window over SSH)
 alias ta='tmux attach -t'             # ta main
 alias tn='tmux new -s'                # tn main
 alias tl='tmux ls'
 alias tk='tmux kill-session -t'       # tk main
 
-# Wordlists (Kali paths)
-export WORDLISTS="/usr/share/wordlists"
-export SECLISTS="/usr/share/seclists"
-export ROCKYOU="/usr/share/wordlists/rockyou.txt"
-
-# Functions
-b64e() { echo -n "$1" | base64; }
-b64d() { echo -n "$1" | base64 -d; }
-urlencode() { python3 -c "import urllib.parse; print(urllib.parse.quote('$1'))"; }
-urldecode() { python3 -c "import urllib.parse; print(urllib.parse.unquote('$1'))"; }
+# Encoders. Arguments are passed as argv, never interpolated into the Python
+# source -- otherwise a quote in the input is a syntax error at best.
+b64e() { echo -n "\$1" | base64; }
+b64d() { echo -n "\$1" | base64 -d; }
+urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "\$1"; }
+urldecode() { python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "\$1"; }
 
 # Auto-attach a persistent tmux session on interactive SSH login, so a dropped
-# connection never kills your work — you reconnect straight back into it. Guards:
-# only for interactive SSH shells that aren't already inside tmux. Delete this
-# block if you'd rather start tmux by hand.
-if [[ -n "$SSH_CONNECTION" && -z "$TMUX" && $- == *i* ]] && command -v tmux &>/dev/null; then
+# connection never kills your work -- you reconnect straight back into it.
+# Guards: only interactive SSH shells that aren't already inside tmux. Set
+# NO_AUTO_TMUX=1 in your environment (or ssh with it) to get a plain shell --
+# you want that escape hatch the day tmux itself is what's broken.
+if [[ -n "\$SSH_CONNECTION" && -z "\$TMUX" && -z "\${NO_AUTO_TMUX:-}" && \$- == *i* ]] \\
+   && command -v tmux &>/dev/null; then
     tmux attach -t main 2>/dev/null || tmux new -s main
 fi
-ZSHRC
-
-    chown "$REAL_USER:$REAL_USER" "$USER_HOME/.zshrc"
+$ZSHRC_END_MARKER
+ZSHRC_BLOCK
+        chown "$REAL_USER:$REAL_USER" "$ZSHRC"
+        msg "appended config block to $ZSHRC"
+    fi
 fi
 
 # ------------------------------------------------------------------------------
-# Phase 7: Wordlists
+# Phase: wordlists
 # ------------------------------------------------------------------------------
 
-msg "Preparing wordlists..."
+if should_run wordlists; then
+    phase "Phase: wordlists"
 
-# Kali ships rockyou gzipped; decompress it in place (keep the .gz).
-if [[ -f "$WORDLIST_DIR/rockyou.txt.gz" && ! -f "$WORDLIST_DIR/rockyou.txt" ]]; then
-    gunzip -k "$WORDLIST_DIR/rockyou.txt.gz" && msg "Decompressed rockyou.txt"
-elif [[ -f "$WORDLIST_DIR/rockyou.txt" ]]; then
-    msg "rockyou.txt already present"
-else
-    warn "rockyou.txt(.gz) not found (is the 'wordlists' package installed?)"
+    # Kali ships rockyou gzipped; decompress in place, keeping the .gz.
+    if [[ -f "$WORDLIST_DIR/rockyou.txt" ]]; then
+        msg "rockyou.txt already present"
+    elif [[ -f "$WORDLIST_DIR/rockyou.txt.gz" ]]; then
+        run gunzip -k "$WORDLIST_DIR/rockyou.txt.gz" && msg "decompressed rockyou.txt"
+    else
+        warn "rockyou.txt(.gz) not found (is the 'wordlists' package installed?)"
+    fi
+
+    if [[ -d /usr/share/seclists ]]; then
+        msg "SecLists present at /usr/share/seclists"
+    else
+        warn "SecLists not found -- 'apt install seclists'"
+    fi
 fi
 
 # ------------------------------------------------------------------------------
 # Verification
 # ------------------------------------------------------------------------------
 
-echo ""
-echo "=============================================="
-echo "  Deploy Complete (headless Kali)"
-echo "=============================================="
-echo ""
-echo "User: $REAL_USER"
-echo ""
+phase "Verification"
+
+if (( DRY_RUN )); then
+    msg "Dry run complete -- nothing was changed."
+    exit 0
+fi
 
 check() {
     if command -v "$1" &>/dev/null; then
-        echo -e "${GREEN}✓${NC} $1"
+        echo -e "${GREEN}/${NC} $1"
     else
-        echo -e "${RED}✗${NC} $1"
+        echo -e "${RED}x${NC} $1"
     fi
 }
 
+echo ""
 echo "Security tools:"
-check nmap
-check ncat
-check binwalk
-check smbclient
-check hashcat
-check proxychains4
-check enum4linux
-check netexec
-check responder
-check mitm6
-check certipy
-check bloodhound-python
-check impacket-ntlmrelayx
+for c in "${VERIFY_BINS_TOOLS[@]}"; do
+    check "$c"
+done
 
 echo ""
 echo "Access layer:"
-check tmux
-check zsh
-check sshd
-check tailscale
+for c in "${VERIFY_BINS_ACCESS[@]}"; do
+    check "$c"
+done
+
 if command -v tailscale &>/dev/null; then
     if tailscale status &>/dev/null; then
         echo -e "  ${GREEN}Tailscale IP:${NC} $(tailscale ip -4 2>/dev/null | head -1)"
     else
-        echo -e "  ${YELLOW}Tailscale installed but not yet logged in — run: sudo tailscale up --ssh${NC}"
+        echo -e "  ${YELLOW}Tailscale installed but not logged in -- run: sudo tailscale up --ssh${NC}"
     fi
 fi
 if command -v ufw &>/dev/null; then
-    echo -e "  ufw: $(ufw status 2>/dev/null | head -1)"
+    echo "  ufw: $(ufw status 2>/dev/null | head -1)"
 fi
 
 echo ""
 echo "Wordlists:"
-[[ -f "$WORDLIST_DIR/rockyou.txt" ]] && echo -e "${GREEN}✓${NC} rockyou.txt" || echo -e "${RED}✗${NC} rockyou.txt"
-[[ -d "${SECLISTS:-/usr/share/seclists}" || -d "$WORDLIST_DIR/seclists" ]] && echo -e "${GREEN}✓${NC} SecLists" || echo -e "${RED}✗${NC} SecLists"
+[[ -f "$WORDLIST_DIR/rockyou.txt" ]] \
+    && echo -e "${GREEN}/${NC} rockyou.txt" || echo -e "${RED}x${NC} rockyou.txt"
+[[ -d "${SECLISTS:-/usr/share/seclists}" || -d "$WORDLIST_DIR/seclists" ]] \
+    && echo -e "${GREEN}/${NC} SecLists"   || echo -e "${RED}x${NC} SecLists"
 
+# What is actually listening, right now. Read this rather than trusting the
+# ufw summary above.
 echo ""
-echo "=============================================="
-echo "  How to connect"
-echo "=============================================="
-echo ""
-echo "From any device on your tailnet:"
-echo "  tailscale ssh $REAL_USER@<this-hostname>     # Tailscale SSH (primary)"
-echo "  ssh $REAL_USER@<tailscale-ip>                # OpenSSH fallback"
-echo ""
-echo "Then, for multiple terminal windows:"
-echo "  tmux new -s main       # start (or 'ta main' to re-attach after a drop)"
-echo "  Ctrl-b c   new window     Ctrl-b n/p  next/prev window"
-echo "  Ctrl-b |   split vert      Ctrl-b -   split horiz"
-echo "  Ctrl-b d   detach (leaves everything running on the box)"
-echo ""
-echo "Your shell auto-attaches to a 'main' tmux session on SSH login."
-echo "See TMUX-TAILSCALE-CHEATSHEET.md for the full reference."
-echo ""
+echo "Listening sockets (should be tailnet/loopback only):"
+if command -v ss &>/dev/null; then
+    ss -tulpnH 2>/dev/null | awk '{printf "  %-6s %-24s %s\n", $1, $5, $7}' \
+        || echo "  (ss failed)"
+else
+    echo "  (ss not available)"
+fi
+
+cat <<BANNER
+
+==============================================
+  Deploy complete (headless Kali)
+==============================================
+
+  Log: $LOGFILE
+
+  From any device on your tailnet:
+    tailscale ssh $REAL_USER@<this-hostname>     # Tailscale SSH (primary)
+    ssh $REAL_USER@<tailscale-ip>                # OpenSSH fallback
+
+  Then, for multiple terminal windows:
+    tmux new -s main       # start (or 'ta main' to re-attach after a drop)
+    Ctrl-b c   new window      Ctrl-b n/p  next/prev window
+    Ctrl-b |   split vert      Ctrl-b -    split horiz
+    Ctrl-b d   detach (leaves everything running on the box)
+
+  Your shell auto-attaches to a 'main' tmux session on SSH login.
+  For a plain shell instead: NO_AUTO_TMUX=1 ssh $REAL_USER@<host>
+
+  See TMUX-TAILSCALE-CHEATSHEET.md for the full reference.
+
+BANNER

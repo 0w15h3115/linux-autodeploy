@@ -39,6 +39,8 @@ Options:
 --only <phase>     run only these phases (repeatable)
 --list-phases      print phase names
 --print-packages   print every package the script can install
+--print-checked-binaries
+                   print every binary the verification pass ticks
 -h, --help
 ```
 
@@ -60,6 +62,11 @@ reverse-engineering, 802-11, wireless, bluetooth, rfid.
 
 Not included: `kali-tools-sdr` (gnuradio is a very large dependency tree). Add it to
 `TOOL_METAS` if you want it.
+
+`EXTRA_PKGS` names the things the metapackages don't cover — including the AD and web
+tooling (`netexec`, `mitm6`, `certipy-ad`, `enum4linux-ng`, `bloodhound.py`, `ffuf`,
+`gobuster`), which is *not* in the `kali-tools-*` closure. Don't assume the ISO will
+supply them; see the Testing section.
 
 The desktop is `kali-desktop-i3`, which is a complete desktop — i3, lightdm, polybar,
 kitty, picom, feh, network-manager, betterlockscreen — with the i3 session registered
@@ -121,15 +128,32 @@ no GUI, joins a tailnet with Tailscale SSH as the primary auth path, hardens Ope
 a fallback, and restricts inbound to the `tailscale0` interface.
 
 ```bash
-sudo ./kali-deploy-remote [agent] [profile]
+sudo ./kali-deploy-remote
 ```
 
+It takes the same flags as the physical script — `--dry-run`, `--skip`, `--only`,
+`--list-phases`, `--print-packages`, `--help`.
+
+Phases: `base tools tailscale ssh firewall tmux shell wordlists`
+
 Environment knobs: `TS_AUTHKEY`, `TS_ADVERTISE_TAGS`, `SSH_PUBKEY`, `SKIP_TAILSCALE=1`,
-`SKIP_UFW=1`.
+`SKIP_UFW=1`. The last two are equivalent to `--skip tailscale` / `--skip firewall` and
+are kept so older invocations don't break.
 
 It will not disable password auth or enable the firewall unless it can prove you have
 another way in (an installed key, or Tailscale already up) — a box that can't reach
 itself is worse than one with password auth on.
+
+Like the physical script it keeps Kali's own zsh and appends a marker-guarded block;
+Oh My Zsh and the `agnoster` theme are deliberately *not* installed. Agnoster needs
+powerline glyphs in the terminal you're connecting *from*, so over SSH from anything
+unconfigured it renders as boxes.
+
+Your shell auto-attaches to a `main` tmux session on interactive SSH login, so a
+dropped connection never kills your work. For a plain shell — the day tmux itself is
+what's broken — connect with `NO_AUTO_TMUX=1`.
+
+A full transcript goes to `/var/log/kali-deploy-remote-<timestamp>.log`.
 
 See `TMUX-TAILSCALE-CHEATSHEET.md`.
 
@@ -138,22 +162,31 @@ See `TMUX-TAILSCALE-CHEATSHEET.md`.
 ## Testing
 
 Deploy scripts are hard to test because the failure mode is a half-configured machine.
-`tests/` validates `kali-deploy-physical` against a real Kali container before it
-touches hardware:
+`tests/` validates **both** scripts against a real Kali container before either touches
+hardware:
 
 ```bash
 tests/run-tests.sh                # static analysis + container suite
 tests/run-tests.sh --static-only  # bash -n + shellcheck only
 ```
 
-Covers: every package name resolving to an installation candidate, full dependency
-resolution via `apt --simulate`, `--dry-run` mutating nothing, the config phases
-running for real with correct ownership, `i3 -C` validating the generated config,
-idempotency across repeated runs, graceful degradation with no systemd, injected
+Covers, for each script: every package name resolving to an installation candidate,
+full dependency resolution via `apt --simulate`, every binary the verification pass
+ticks actually being delivered by that package set, `--dry-run` mutating nothing, the
+config phases running for real with correct ownership, `i3 -C` / `tmux` validating the
+generated configs, idempotency across repeated runs, backups surviving a re-run,
+graceful degradation with no systemd, the SSH and firewall lockout guards, injected
 bad-package handling, and argument validation.
 
-The suite reads its package list from `--print-packages`, so it cannot drift out of
-sync with the script.
+The suite reads its package list from `--print-packages` and its expected-binary list
+from `--print-checked-binaries`, so neither can drift out of sync with the script.
+
+That second one exists because of a real bug: the physical script printed a green tick
+for seven tools it never installed. Four of them (`netexec`, `bloodhound.py`, `ffuf`,
+`gobuster`) happened to be in the ISO's `kali-linux-default`, so on a stock install they
+looked fine — luck, not intent, and gone on a netinst. The other three (`mitm6`,
+`certipy-ad`, `enum4linux-ng`) were missing on every path. A red X at the end of a
+40-minute deploy, on the day you need the box, is how you would have found out.
 
 Requires docker. It pulls `kalilinux/kali-rolling` and
 `koalaman/shellcheck` and modifies nothing on the host.

@@ -51,6 +51,11 @@ script again rather than by reimaging. Config writes are overwrite-with-backup;
 appends are marker-guarded; `--only` and `--skip` let a single failed phase be
 retried in isolation.
 
+A backup is taken **once**, the first time we are about to replace a file. Copying
+on every run means the second run overwrites the backup with the config the first
+run generated, so the original is recoverable exactly once — which is to say, not
+when you actually need it.
+
 ### Never lock the operator out
 
 `kali-deploy-remote` will not disable SSH password authentication or enable
@@ -61,12 +66,36 @@ password auth enabled.
 `kali-deploy-physical` inverts this: you have the keyboard, so default-deny
 inbound is enabled unconditionally.
 
-### Distro-native, no third-party repositories
+### Distro-native, with one declared exception
 
 Everything comes from the distribution's own archive. No `/opt` virtualenv, no
-pipx-from-git, no `setcap` on a venv symlink, no external apt repositories.
-Mixing third-party repos into a rolling release is a known way to break it, and
-every tool these scripts need is already packaged.
+pipx-from-git, no `setcap` on a venv symlink. Mixing third-party repos into a
+rolling release is a known way to break it, and every *tool* these scripts need
+is already packaged.
+
+The exception is Tailscale, in `kali-deploy-remote`: it is not in Kali's archive
+and it is the entire access layer, so the script adds Tailscale's signed apt repo
+(pinned to the `bookworm` channel, which doesn't churn) and falls back to the
+official installer only if that fails. It is called out here rather than left as
+a surprise, and it is the only one.
+
+### A verification tick must mean something
+
+The end-of-run `check` list is the last thing you read before trusting the box,
+so it must not be able to lie in either direction. Checking for a binary nothing
+installs is worse than not checking at all: it trains you to skim past red.
+
+The lists live in `VERIFY_BINS_*` arrays, are exposed by
+`--print-checked-binaries`, and `tests/` T9 asserts every entry is delivered by
+the closure of `--print-packages`. Note these are *binary* names, not package
+names — `certipy-ad` ships `/usr/bin/certipy-ad`, while `/usr/bin/certipy`
+belongs to `python3-certipy`, an unrelated library.
+
+### Don't inherit what the ISO happens to provide
+
+`kali-linux-default` ships with the Kali installer, so a tool it contains looks
+present whether or not the script installs it. That is luck, and it evaporates on
+a netinst or a minimal image. Anything the script depends on, the script names.
 
 ### Don't branch on distribution version
 
@@ -76,11 +105,15 @@ version number.
 
 ### Leave the platform's own configuration alone
 
-Kali ships a tuned zsh. The script appends a marker-guarded block rather than
+Kali ships a tuned zsh. Both scripts append a marker-guarded block rather than
 installing a framework over the top — faster shell startup, cleanly removable,
 and no `sed` against a template that may not be there. v4 shipped exactly that
 bug: its theme and plugin edits silently no-opped whenever the expected template
-was absent.
+was absent, and `kali-deploy-remote` carried the same `sed` until it was rewritten.
+
+The `agnoster` theme went with it. It needs powerline glyphs in the terminal you
+are connecting *from*, which on a headless box is not a thing the deploy script
+can install.
 
 ### Say what could not be verified
 
@@ -100,11 +133,13 @@ header/usage -> arg parsing -> logging -> helpers -> pre-flight
 
 Shared helpers: `msg`/`warn`/`err` (warnings and errors to **stderr**, so they
 are never captured by a `$(...)` substitution), `get_real_user` /
-`get_user_home`, `apt_available` / `apt_install` / `apt_install_first`, and
-`check` for verification.
+`get_user_home`, `apt_available` / `apt_install` / `apt_install_first`, `run()`
+and `write_file()` so `--dry-run` is honoured in one place rather than at every
+call site, `backup_once()`, and `check` for verification.
 
-`kali-deploy-physical` adds `run()` and `write_file()` so `--dry-run` is
-honoured in one place rather than at every call site.
+Both scripts take the same flags and both are phase-based. That symmetry is
+deliberate: two scripts with different argument grammars is two things to
+remember at 3am.
 
 ## Testing
 
@@ -113,15 +148,28 @@ target useless — by the time you learn, you have already paid the cost. So
 everything testable is tested in a throwaway Kali container first, via
 `tests/`.
 
-The suite deliberately covers the *failure* paths, not just the happy one:
-injected unavailable packages, a missing systemd, bad arguments, repeated runs.
-It reads its package list from `--print-packages` so it cannot drift from the
-script.
+Both scripts are exercised. The suite deliberately covers the *failure* paths,
+not just the happy one: injected unavailable packages, a missing systemd, bad
+arguments, repeated runs, and the lockout guards. It reads its package list from
+`--print-packages` and its binary list from `--print-checked-binaries` so neither
+can drift from the script.
 
-Its value is not theoretical. It caught, before any hardware was touched, that
-`kali-desktop-i3` depends on `betterlockscreen`, which depends on
-`i3lock-color`, which both *Conflicts* and *Provides* `i3lock` — so naming
-`i3lock` explicitly made the entire package set unresolvable.
+Its value is not theoretical. It has caught, before any hardware was touched:
+
+- `kali-desktop-i3` depends on `betterlockscreen`, which depends on
+  `i3lock-color`, which both *Conflicts* and *Provides* `i3lock` — so naming
+  `i3lock` explicitly made the entire package set unresolvable.
+- Seven tools the physical script ticked and never installed, three of them
+  missing on every install path.
+- `dnsutils`, which the remote script had installed for as long as it existed,
+  has no candidate on current Kali — it is `bind9-dnsutils` now. The box came up
+  without `dig` and said nothing about it.
+
+The package-level checks run against a **pristine** image, before the suite
+installs its own prerequisites. `apt-get install --simulate` only reports what it
+would *newly* install, so a package the test harness pulled in first vanishes
+from the closure and T9 reports it as missing. A test that cries wolf about the
+one thing it uniquely catches is worse than no test.
 
 ## Non-goals
 
