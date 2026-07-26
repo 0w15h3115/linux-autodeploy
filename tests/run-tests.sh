@@ -1,5 +1,5 @@
 #!/bin/bash
-# run-tests.sh -- validate kali-autodeploy-laptop before it touches hardware.
+# run-tests.sh -- validate kali-autodeploy-physical before it touches hardware.
 #
 # Runs static analysis on the host, then the full suite inside a throwaway
 # kalilinux/kali-rolling container. Nothing here modifies your machine.
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$REPO/kali-autodeploy-laptop"
+SCRIPT="$REPO/kali-autodeploy-physical"
 IMAGE="kalilinux/kali-rolling:latest"
 STATIC_ONLY=0
 
@@ -71,7 +71,7 @@ docker image inspect "$IMAGE" &>/dev/null || {
 # uses. Read-only bind mount: the tests must never modify the repo.
 docker run --rm \
     -v "$REPO:/repo:ro" \
-    -e SCRIPT=/repo/kali-autodeploy-laptop \
+    -e SCRIPT=/repo/kali-autodeploy-physical \
     "$IMAGE" \
     bash /repo/tests/container-tests.sh
 container_rc=$?

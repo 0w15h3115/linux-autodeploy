@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Kali Laptop Deploy Script (kali-autodeploy-laptop)
+# Kali Physical Deploy Script (kali-autodeploy-physical)
 # Tools come from Kali's own kali-tools-* metapackages
 # Installs:
 #   - kali-tools-* metapackages (see TOOL_METAS below -- edit to taste)
@@ -13,7 +13,7 @@
 #   advertisement, NetworkManager MAC randomization, idle screen lock.
 #
 # Usage:
-#   sudo ./kali-autodeploy-laptop [options]
+#   sudo ./kali-autodeploy-physical [options]
 #
 #   --dry-run          show what would happen; change nothing
 #   --skip <phase>     skip a phase (repeatable)
@@ -38,8 +38,8 @@ set -uo pipefail
 # ------------------------------------------------------------------------------
 
 readonly WORDLIST_DIR="/usr/share/wordlists"
-readonly ZSHRC_MARKER="# >>> kali-autodeploy-laptop >>>"
-readonly ZSHRC_END_MARKER="# <<< kali-autodeploy-laptop <<<"
+readonly ZSHRC_MARKER="# >>> kali-autodeploy-physical >>>"
+readonly ZSHRC_END_MARKER="# <<< kali-autodeploy-physical <<<"
 readonly MIN_DISK_GB=20
 
 # Tool metapackages. Kali curates these and resolves their dependencies, so the
@@ -303,7 +303,7 @@ fi
 
 # Log everything. A deploy that fails 40 minutes in is only debuggable if the
 # transcript outlived the scrollback. Skipped for --dry-run (nothing to record).
-LOGFILE="/var/log/kali-autodeploy-laptop-$(date +%Y%m%d-%H%M%S).log"
+LOGFILE="/var/log/kali-autodeploy-physical-$(date +%Y%m%d-%H%M%S).log"
 if (( ! DRY_RUN )); then
     exec > >(tee -a "$LOGFILE") 2>&1
 fi
@@ -468,7 +468,7 @@ if should_run harden; then
     # you aren't trivially trackable across the conference network.
     msg "Configuring NetworkManager MAC randomization..."
     write_file /etc/NetworkManager/conf.d/00-macrandomize.conf <<'NMCONF'
-# Managed by kali-autodeploy-laptop -- MAC randomization.
+# Managed by kali-autodeploy-physical -- MAC randomization.
 # scan-rand-mac-address randomizes the MAC used while scanning for networks;
 # cloned-mac-address=random gives a fresh MAC per connection. Delete this file
 # to restore stock behaviour (some captive portals and MAC-allowlisted networks
@@ -505,7 +505,7 @@ if should_run i3; then
     [[ -f "$I3_DIR/config" ]] && run cp "$I3_DIR/config" "$I3_DIR/config.backup"
 
     write_file "$I3_DIR/config" <<'I3CONFIG'
-# i3 config -- kali-autodeploy-laptop
+# i3 config -- kali-autodeploy-physical
 # Mod is Alt (Mod1), not Super. Deliberate, carried over from the Ubuntu recipe.
 
 set $mod Mod1
@@ -839,7 +839,7 @@ if should_run shell; then
         cat >> "$ZSHRC" <<ZSHRC_BLOCK
 
 $ZSHRC_MARKER
-# Added by kali-autodeploy-laptop. Delete this block (through the closing
+# Added by kali-autodeploy-physical. Delete this block (through the closing
 # marker) to remove. Kali's own zsh config above is untouched.
 
 export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH"

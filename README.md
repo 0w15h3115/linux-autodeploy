@@ -9,21 +9,21 @@ the Ubuntu recipes they grew out of.
 
 | Script | Target | Desktop | Access |
 |---|---|---|---|
-| **`kali-autodeploy-laptop`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
-| **`kali-autodeploy`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
+| **`kali-autodeploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
+| **`kali-autodeploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
 | `ubuntu-autodeploy-v5` | Ubuntu workstation | i3 + polybar + kitty | n/a |
 | `ubuntu-autodeploy-v4` | superseded by v5 | | |
 | `Ubuntu-Autodeploy-Original-Recipe.sh` | kept for reference | | |
 
 ---
 
-## kali-autodeploy-laptop
+## kali-autodeploy-physical
 
 A Kali-first deploy for a laptop you carry: the full tool set, the i3 desktop, and
 hardening aimed at a conference network.
 
 ```bash
-sudo ./kali-autodeploy-laptop
+sudo ./kali-autodeploy-physical
 ```
 
 Options:
@@ -41,7 +41,7 @@ Phases: `base tools desktop harden i3 polybar kitty shell wordlists`
 
 Re-running is always safe — every phase is idempotent, so a run that dies partway
 can be resumed by running it again (or narrowed with `--only`). A full transcript
-goes to `/var/log/kali-autodeploy-laptop-<timestamp>.log`.
+goes to `/var/log/kali-autodeploy-physical-<timestamp>.log`.
 
 ### What it installs
 
@@ -104,19 +104,19 @@ end rather than claiming they passed:
 Kali's own zsh config is left intact; the script appends a marker-guarded block with
 PATH, wordlist variables, and aliases. Oh My Zsh is deliberately *not* installed —
 Kali already ships syntax highlighting and autosuggestions, and OMZ only adds startup
-cost. To remove, delete the block between the `kali-autodeploy-laptop` markers in
+cost. To remove, delete the block between the `kali-autodeploy-physical` markers in
 `~/.zshrc`.
 
 ---
 
-## kali-autodeploy (headless)
+## kali-autodeploy-remote (headless)
 
 For a box you reach over Tailscale rather than sit at. Installs the Kali tool set with
 no GUI, joins a tailnet with Tailscale SSH as the primary auth path, hardens OpenSSH as
 a fallback, and restricts inbound to the `tailscale0` interface.
 
 ```bash
-sudo ./kali-autodeploy [agent] [profile]
+sudo ./kali-autodeploy-remote [agent] [profile]
 ```
 
 Environment knobs: `TS_AUTHKEY`, `TS_ADVERTISE_TAGS`, `SSH_PUBKEY`, `SKIP_TAILSCALE=1`,
@@ -133,8 +133,8 @@ See `TMUX-TAILSCALE-CHEATSHEET.md`.
 ## Testing
 
 Deploy scripts are hard to test because the failure mode is a half-configured machine.
-`tests/` validates the laptop script against a real Kali container before it touches
-hardware:
+`tests/` validates `kali-autodeploy-physical` against a real Kali container before it
+touches hardware:
 
 ```bash
 tests/run-tests.sh                # static analysis + container suite
@@ -157,8 +157,8 @@ Requires docker. It pulls `kalilinux/kali-rolling` and
 
 ## Ubuntu scripts
 
-`ubuntu-autodeploy-v5` is the last Ubuntu version and the source of the i3 desktop the
-Kali laptop script inherits. `SPEC.md` describes the v3 rewrite that established the
+`ubuntu-autodeploy-v5` is the last Ubuntu version and the source of the i3 desktop that
+`kali-autodeploy-physical` inherits. `SPEC.md` describes the v3 rewrite that established the
 current structure. v5 fixed a series of real v4 deploy failures — a package with no
 installation candidate aborting the whole apt batch under `set -e`, `setcap` on a venv
 symlink, `gunzip` on a file that wasn't gzip — which is why none of these scripts use

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Kali Headless Security Tools Deploy Script (kali-autodeploy)
+# Kali Headless Security Tools Deploy Script (kali-autodeploy-remote)
 #
 # A reimagining of the Ubuntu v5 recipe for a *headless* Kali box you reach
 # from anywhere over Tailscale + SSH, with tmux for multiple terminal windows.
@@ -293,7 +293,7 @@ mkdir -p /etc/ssh/sshd_config.d
 
 if $have_authorized_key || $tailscale_up; then
     cat > "$SSHD_DROPIN" << 'SSHD'
-# Managed by kali-autodeploy — hardened OpenSSH (fallback to Tailscale SSH)
+# Managed by kali-autodeploy-remote — hardened OpenSSH (fallback to Tailscale SSH)
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -304,7 +304,7 @@ SSHD
     msg "OpenSSH: password auth DISABLED (key/Tailscale access confirmed)"
 else
     cat > "$SSHD_DROPIN" << 'SSHD'
-# Managed by kali-autodeploy — partial hardening only.
+# Managed by kali-autodeploy-remote — partial hardening only.
 # Password auth left ENABLED because no SSH key was installed and Tailscale was
 # not up at deploy time — disabling it would risk locking you out. Install a key
 # (re-run with SSH_PUBKEY=...) or bring up Tailscale, then re-run to fully harden.
@@ -358,7 +358,7 @@ fi
 msg "Configuring tmux..."
 
 cat > "$USER_HOME/.tmux.conf" << 'TMUX'
-# ~/.tmux.conf — kali-autodeploy (headless multi-window over SSH)
+# ~/.tmux.conf — kali-autodeploy-remote (headless multi-window over SSH)
 # Prefix stays the default Ctrl-b so every tutorial you read matches.
 
 # Quality of life
@@ -437,7 +437,7 @@ if [[ -f "$USER_HOME/.zshrc" ]]; then
 
     cat >> "$USER_HOME/.zshrc" << 'ZSHRC'
 
-# --- Security Tools Configuration (kali-autodeploy) ---
+# --- Security Tools Configuration (kali-autodeploy-remote) ---
 
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
