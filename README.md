@@ -164,9 +164,9 @@ See `TMUX-TAILSCALE-CHEATSHEET.md`.
 ## test-with-tails (Tails OS) — beta
 
 Stocks a Tails live session with the tools it doesn't ship: Nmap (and Ncat),
-Impacket, Sliver, NetExec, Burp Suite Community, proxychains, neovim,
-build-essential, and an Apache server. The awkward part is that every fetch has to
-go through Tor, as the `amnesia` user — dealing with those quirks, and the
+Impacket, NetExec, Burp Suite Community, proxychains, neovim, build-essential, an
+Apache server, and a staged copy of Mythic. The awkward part is that every fetch has
+to go through Tor, as the `amnesia` user — dealing with those quirks, and the
 permissions problems that come with them, is the reason the script exists.
 
 ```bash
@@ -182,8 +182,9 @@ sudo ./test-with-tails
 **After it finishes**
 
 - Burp Suite is downloaded but not installed — run the GUI installer yourself:
-  `./burpsuite.sh`. It's the current Community build, ~380 MB, which makes it the
+  `~/burpsuite.sh`. It's the current Community build, ~380 MB, which makes it the
   slow part of the run over Tor.
+- Mythic is cloned to `~/Mythic` but not built or started. See below.
 - Tails is amnesic. Unless you are running from Persistent Storage, all of this is
   gone at the next boot and the script has to run again, over Tor.
 
@@ -194,6 +195,23 @@ sudo ./test-with-tails
 - Standing up the Apache server opens a listener on your Tails session — it pokes a
   hole in your persec. It is started but not enabled (nothing survives the session
   anyway); `sudo systemctl stop apache2` if you don't need it.
+
+**Mythic replaces Sliver, and it is staged rather than installed.** Sliver was a
+single static binary; Mythic is a Docker stack, and two things about Tails get in
+its way. The Docker daemon runs as root, and root's traffic is not torified — the
+Tails firewall drops it, so image pulls fail, and so does `make`, which pulls its
+builder image from `ghcr.io`. And the images run to several GB against a filesystem
+that is RAM. So the script installs the daemon and clones the repo:
+
+```bash
+cd ~/Mythic && sudo make        # builds mythic-cli
+sudo ./mythic-cli start         # brings the stack up
+```
+
+Both of those need egress the Tails firewall doesn't give the daemon, so bringing
+Mythic up is a decision you make with a plan for that, not something the script does
+behind your back. If you just want a C2 on a live session with no Docker, a single
+static implant server is the better shape — that was Sliver's one advantage here.
 
 NetExec installs as **`nxc`** in `/usr/local/bin` — that's the command name, not
 `netexec`. Its Linux build comes from a GitHub release asset, and because the newest

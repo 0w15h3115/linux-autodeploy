@@ -39,22 +39,39 @@ echo "Installing build-essential..."
 sudo apt install build-essential -y
 # Working
 
-# Install Sliver C2
-echo "Installing Sliver..."
-sudo -u amnesia torify wget https://github.com/BishopFox/sliver/releases/latest/download/sliver-server_linux -O sliver-server
-chmod +x sliver-server
-sudo mv sliver-server /usr/local/bin/sliver-server
-# Working
+# Install Mythic C2 (replaces Sliver)
+# Mythic is not a single binary the way Sliver was -- it is a Docker stack, and
+# two things about Tails get in its way:
+#   * the Docker daemon runs as root, and root's traffic is not torified, so
+#     the Tails firewall drops it. Image pulls fail, and so does `make`, which
+#     pulls its builder image from ghcr.io.
+#   * the images are several GB, and a Tails session's filesystem is RAM.
+# So this stages the repo and installs the daemon; bringing Mythic up is a
+# decision you make with an egress plan, not something a deploy script should
+# do behind your back. See the README.
+echo "Staging Mythic (not started -- see README)..."
+sudo apt install docker.io docker-compose git -y
+sudo -u amnesia torify git clone --depth 1 https://github.com/its-a-feature/Mythic.git /home/amnesia/Mythic
+echo "  staged at /home/amnesia/Mythic"
+echo "  build:    cd /home/amnesia/Mythic && sudo make"
+echo "  start:    sudo ./mythic-cli start"
+echo "  both need egress the Tails firewall does not give the docker daemon."
+# Staged, not started
 
 # Download and Install Burp Suite Community Edition
 # No version= parameter. With one (this was pinned to 2023.6.1) you pull a
 # years-stale Burp down over Tor and get told to update it on first launch;
 # without one PortSwigger serves the current Community build for the platform.
 # It is ~380 MB, so this is the slow part of the run.
+#
+# Lands in amnesia's home rather than the current directory: the download runs
+# as amnesia, so a cwd amnesia cannot write to (/root, say) would fail the
+# fetch, and the installer is run later from the GUI session, where home is
+# where you would look for it.
 echo "Installing Burp Suite..."
-sudo -u amnesia torify wget "https://portswigger.net/burp/releases/download?product=community&type=Linux" -O burpsuite.sh
-sudo chmod +x burpsuite.sh
-# will need to run installer at later time (./burpsuite.sh)
+sudo -u amnesia torify wget "https://portswigger.net/burp/releases/download?product=community&type=Linux" -O /home/amnesia/burpsuite.sh
+sudo chmod +x /home/amnesia/burpsuite.sh
+# will need to run installer at later time (~/burpsuite.sh)
 # Working somewhat
 
 # Install Netexec
