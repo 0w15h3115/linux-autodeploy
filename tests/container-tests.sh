@@ -210,6 +210,21 @@ else
     pass "running as root directly is rejected"
 fi
 
+# --help prints the header comment block. It used to do that by hardcoded line
+# range, so trimming the header spilled `set -uo pipefail` and the readonly
+# declarations into the help output. Assert no shell code leaks.
+help_out=$("$SCRIPT" --help 2>&1)
+if grep -qE '^\s*(set -|readonly |[A-Z_]+=\(|\}|fi$)' <<<"$help_out"; then
+    fail "--help is leaking shell code"
+    grep -nE '^\s*(set -|readonly |[A-Z_]+=\(|\}|fi$)' <<<"$help_out" | head -5 | sed 's/^/    /'
+else
+    pass "--help contains no shell code"
+fi
+
+grep -q -- '--dry-run' <<<"$help_out" \
+    && pass "--help documents the options" \
+    || fail "--help is missing the options block"
+
 # ------------------------------------------------------------------------------
 echo ""
 echo "=============================================="

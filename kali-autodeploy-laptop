@@ -19,6 +19,7 @@
 #   --skip <phase>     skip a phase (repeatable)
 #   --only <phase>     run only these phases (repeatable)
 #   --list-phases      print phase names and exit
+#   --print-packages   print every package this script can install
 #   -h, --help         this message
 #
 # Phases: base tools desktop harden i3 polybar kitty shell wordlists
@@ -130,8 +131,11 @@ warn()  { echo -e "${YELLOW}[*]${NC} $1" >&2; }
 err()   { echo -e "${RED}[!]${NC} $1" >&2; }
 phase() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 
+# Help text is the header comment block itself. Read it structurally -- from
+# line 3 to the first line that isn't a comment -- rather than by hardcoded line
+# numbers, so editing the header can't leak code into --help.
 usage() {
-    sed -n '3,50p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR>2 { if (/^#/) { sub(/^# ?/, ""); print } else { exit } }' "$0"
     exit 0
 }
 
