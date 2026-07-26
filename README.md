@@ -4,9 +4,10 @@
 [![Kali container suite](https://github.com/owlshells/tooling-deployment-scripts/actions/workflows/container.yml/badge.svg)](https://github.com/owlshells/tooling-deployment-scripts/actions/workflows/container.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Automated deploy scripts for Kali security workstations — one for hardware you sit
-at, one for a headless box you reach remotely. Both are validated against a real
-Kali container before they touch a machine.
+Automated deploy scripts for security workstations — Kali on hardware you sit at,
+Kali on a headless box you reach remotely, and a Tails live session stocked with
+pentest tooling over Tor. The two Kali scripts are validated against a real Kali
+container before they touch a machine.
 
 > For authorized engagements, CTFs, and lab work only.
 
@@ -16,9 +17,10 @@ Kali container before they touch a machine.
 |---|---|---|---|
 | **`kali-deploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
 | **`kali-deploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
+| **`test-with-tails`** *(beta)* | Tails OS live session | Tails' own GNOME | everything over Tor; nothing persists |
 
 Superseded Ubuntu scripts live in [`archive/`](archive/). `SPEC.md` covers the
-design reasoning behind the current pair.
+design reasoning behind the two Kali scripts.
 
 ---
 
@@ -159,11 +161,55 @@ See `TMUX-TAILSCALE-CHEATSHEET.md`.
 
 ---
 
+## test-with-tails (Tails OS) — beta
+
+Stocks a Tails live session with the tools it doesn't ship: Nmap (and Ncat),
+Impacket, Sliver, NetExec, Burp Suite Community, proxychains, neovim,
+build-essential, and an Apache server. The awkward part is that every fetch has to
+go through Tor, as the `amnesia` user — dealing with those quirks, and the
+permissions problems that come with them, is the reason the script exists.
+
+```bash
+sudo ./test-with-tails
+```
+
+**Before you run it**
+
+1. Set an **administration password** at the Tails greeter when you log in. Without
+   one there is no root, and this must be run from a **root terminal**.
+2. If `git clone` fails over Tor, `wget` the raw file instead and `chmod +x` it.
+
+**After it finishes**
+
+- Burp Suite is downloaded but not installed — run the GUI installer yourself:
+  `./burpsuite.sh`.
+- Tails is amnesic. Unless you are running from Persistent Storage, all of this is
+  gone at the next boot and the script has to run again, over Tor.
+
+**Operating notes**
+
+- All traffic goes through Tor, and Tor carries **neither ICMP nor UDP**. Nmap has
+  to run with `-Pn`, wrapped in `proxychains` or `torify`.
+- Standing up the Apache server opens a listener on your Tails session — it pokes a
+  hole in your persec. Don't leave it running if you don't need it.
+
+**Known rough edges.** This is the original beta, imported as written rather than
+rewritten, so it doesn't have the phase engine, `--dry-run`, or the verification
+pass the Kali scripts have — and it carries a few real defects:
+
+- NetExec is **not** actually installed. The download fetches the GitHub project
+  page rather than a release, and then marks the HTML executable.
+- Burp is pinned to `2023.6.1` rather than tracking the current release.
+- `systemctl enable apache2` is meaningless on an amnesic system — it does not
+  survive a reboot.
+
+---
+
 ## Testing
 
 Deploy scripts are hard to test because the failure mode is a half-configured machine.
-`tests/` validates **both** scripts against a real Kali container before either touches
-hardware:
+`tests/` validates **both Kali scripts** against a real Kali container before either
+touches hardware:
 
 ```bash
 tests/run-tests.sh                # static analysis + container suite
@@ -180,6 +226,11 @@ bad-package handling, and argument validation.
 
 The suite reads its package list from `--print-packages` and its expected-binary list
 from `--print-checked-binaries`, so neither can drift out of sync with the script.
+
+`test-with-tails` gets the static checks (`bash -n`, shellcheck) and nothing more.
+Tails publishes no container image, and the script's install path depends on Tor and
+on the live session's `amnesia` user — neither of which a container reproduces, so a
+container pass would prove nothing about the run that matters.
 
 That second one exists because of a real bug: the physical script printed a green tick
 for seven tools it never installed. Four of them (`netexec`, `bloodhound.py`, `ffuf`,

@@ -14,6 +14,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHYSICAL="kali-deploy-physical"      # scripts under test, repo-relative
 REMOTE="kali-deploy-remote"
+TAILS="test-with-tails"              # static analysis only; see CHECK_FILES
 IMAGE="kalilinux/kali-rolling:latest"
 STATIC_ONLY=0
 
@@ -29,10 +30,13 @@ head_ "Static analysis (host)"
 
 # Every maintained script, repo-relative. archive/ is deliberately excluded --
 # those are superseded and full of the very patterns the current scripts were
-# written to avoid.
+# written to avoid. $TAILS is checked here but not in the container suite:
+# Tails has no container image, and its install path needs Tor and the live
+# session's amnesia user.
 CHECK_FILES=(
     "$PHYSICAL"
     "$REMOTE"
+    "$TAILS"
     tests/run-tests.sh
     tests/container-tests.sh
 )
