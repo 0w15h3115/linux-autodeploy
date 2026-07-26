@@ -2,20 +2,7 @@
 
 # Kali Laptop Deploy Script (kali-autodeploy-laptop)
 #
-# A Kali-first deploy for a *physical laptop* you sit in front of: the full tool
-# set plus the i3/polybar/kitty desktop carried over from the Ubuntu v5 recipe,
-# hardened for use on a hostile conference network.
-#
-# This is NOT the headless sibling. See `kali-autodeploy` for a box you reach
-# over Tailscale SSH; that script deliberately drops the GUI. This one has no
-# Tailscale, no SSH server, and assumes you are at the keyboard.
-#
-# Kali-first, not an Ubuntu port. Tools come from Kali's own kali-tools-*
-# metapackages rather than a hand-maintained list of ~40 package names, because
-# a name that no longer resolves is the single most common way a deploy dies
-# partway through. The desktop *configuration* is the part that carries over
-# verbatim -- it is proven, and it is yours.
-#
+Tools come from Kali's own kali-tools-* metapackages
 # Installs:
 #   - kali-tools-* metapackages (see TOOL_METAS below -- edit to taste)
 #   - kali-desktop-i3 (i3 + xorg + kali-desktop-core, session registered with
