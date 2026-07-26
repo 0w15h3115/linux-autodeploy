@@ -11,7 +11,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$REPO/kali-autodeploy-physical"
+SCRIPT_NAME="kali-autodeploy-physical"   # the script under test, repo-relative
 IMAGE="kalilinux/kali-rolling:latest"
 STATIC_ONLY=0
 
@@ -25,30 +25,45 @@ rc=0
 
 head_ "Static analysis (host)"
 
-if bash -n "$SCRIPT"; then
-    green "  PASS bash -n"
-else
-    red   "  FAIL bash -n"; rc=1
-fi
+# Every maintained script, repo-relative. archive/ is deliberately excluded --
+# those are superseded and full of the very patterns the current scripts were
+# written to avoid.
+CHECK_FILES=(
+    "$SCRIPT_NAME"
+    kali-autodeploy-remote
+    tests/run-tests.sh
+    tests/container-tests.sh
+)
 
-if command -v shellcheck &>/dev/null; then
-    SC=(shellcheck)
-elif docker image inspect koalaman/shellcheck:stable &>/dev/null; then
-    SC=(docker run --rm -v "$REPO:/mnt" koalaman/shellcheck:stable)
-    SCRIPT_IN_SC="/mnt/$(basename "$SCRIPT")"
-else
-    SC=()
-fi
-
-if (( ${#SC[@]} )); then
-    target="${SCRIPT_IN_SC:-$SCRIPT}"
-    if "${SC[@]}" -S warning "$target"; then
-        green "  PASS shellcheck (warning+)"
+for f in "${CHECK_FILES[@]}"; do
+    if bash -n "$REPO/$f"; then
+        green "  PASS bash -n     $f"
     else
-        red   "  FAIL shellcheck"; rc=1
+        red   "  FAIL bash -n     $f"; rc=1
     fi
+done
+
+# Prefer a host shellcheck; fall back to the container image so this works on a
+# machine that has docker but not shellcheck (and in CI, which has both).
+if command -v shellcheck &>/dev/null; then
+    sc_run() { shellcheck -S warning "${@/#/$REPO/}"; }
+elif docker image inspect koalaman/shellcheck:stable &>/dev/null 2>&1 \
+     || docker pull -q koalaman/shellcheck:stable &>/dev/null; then
+    sc_run() {
+        docker run --rm -v "$REPO:/mnt" koalaman/shellcheck:stable \
+            -S warning "${@/#//mnt/}"
+    }
 else
-    echo "  SKIP shellcheck (not installed; docker pull koalaman/shellcheck:stable)"
+    sc_run() { return 127; }
+fi
+
+if sc_out=$(sc_run "${CHECK_FILES[@]}" 2>&1); then
+    green "  PASS shellcheck  (warning+, ${#CHECK_FILES[@]} files)"
+elif (( $? == 127 )); then
+    echo  "  SKIP shellcheck  (no shellcheck and no docker)"
+else
+    red   "  FAIL shellcheck"; rc=1
+    sed 's/^/    /' <<<"$sc_out" | head -40
 fi
 
 if (( STATIC_ONLY )); then
@@ -71,7 +86,7 @@ docker image inspect "$IMAGE" &>/dev/null || {
 # uses. Read-only bind mount: the tests must never modify the repo.
 docker run --rm \
     -v "$REPO:/repo:ro" \
-    -e SCRIPT=/repo/kali-autodeploy-physical \
+    -e SCRIPT="/repo/$SCRIPT_NAME" \
     "$IMAGE" \
     bash /repo/tests/container-tests.sh
 container_rc=$?

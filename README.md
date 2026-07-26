@@ -1,7 +1,11 @@
 # linux-autodeploy
 
-Automated deploy scripts for security workstations. Two current Kali scripts, plus
-the Ubuntu recipes they grew out of.
+[![CI](https://github.com/owlshells/linux-autodeploy/actions/workflows/ci.yml/badge.svg)](https://github.com/owlshells/linux-autodeploy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Automated deploy scripts for Kali security workstations — one for hardware you sit
+at, one for a headless box you reach remotely. Both are validated against a real
+Kali container before they touch a machine.
 
 > For authorized engagements, CTFs, and lab work only.
 
@@ -11,9 +15,9 @@ the Ubuntu recipes they grew out of.
 |---|---|---|---|
 | **`kali-autodeploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
 | **`kali-autodeploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
-| `ubuntu-autodeploy-v5` | Ubuntu workstation | i3 + polybar + kitty | n/a |
-| `ubuntu-autodeploy-v4` | superseded by v5 | | |
-| `Ubuntu-Autodeploy-Original-Recipe.sh` | kept for reference | | |
+
+Superseded Ubuntu scripts live in [`archive/`](archive/). `SPEC.md` covers the
+design reasoning behind the current pair.
 
 ---
 
@@ -59,7 +63,7 @@ Not included: `kali-tools-sdr` (gnuradio is a very large dependency tree). Add i
 The desktop is `kali-desktop-i3`, which is a complete desktop — i3, lightdm, polybar,
 kitty, picom, feh, network-manager, betterlockscreen — with the i3 session registered
 with the display manager. On top of that the script writes the i3, polybar, and kitty
-configs carried over from `ubuntu-autodeploy-v5`.
+configs carried over from `archive/ubuntu-autodeploy-v5`.
 
 Kali stages its *own* i3/polybar/kitty configs under `/usr/share/i3-dotfiles/` and
 never copies them into `$HOME`, so they don't collide with these. Worth a look if you
@@ -153,13 +157,23 @@ sync with the script.
 Requires docker. It pulls `kalilinux/kali-rolling` and
 `koalaman/shellcheck` and modifies nothing on the host.
 
+CI runs the static checks on every push. The full container suite runs weekly on a
+schedule, on pull requests, and on manual dispatch — Kali is a rolling release, so a
+metapackage can be renamed or a new dependency conflict introduced without anything
+in this repo changing, and the scheduled run is what catches that before a deploy
+does.
+
 ---
 
-## Ubuntu scripts
+## Archive
 
-`ubuntu-autodeploy-v5` is the last Ubuntu version and the source of the i3 desktop that
-`kali-autodeploy-physical` inherits. `SPEC.md` describes the v3 rewrite that established the
-current structure. v5 fixed a series of real v4 deploy failures — a package with no
-installation candidate aborting the whole apt batch under `set -e`, `setcap` on a venv
-symlink, `gunzip` on a file that wasn't gzip — which is why none of these scripts use
-`set -e`.
+`archive/ubuntu-autodeploy-v5` is the last Ubuntu version and the source of the i3
+desktop and the apt-resilience helpers the Kali scripts inherit. It fixed a series of
+real v4 deploy failures — a package with no installation candidate aborting the whole
+apt batch under `set -e`, `setcap` on a venv symlink, `gunzip` on a file that wasn't
+gzip — which is why none of these scripts use `set -e`. See [`archive/`](archive/) for
+the full story.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

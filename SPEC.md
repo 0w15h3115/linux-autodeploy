@@ -1,134 +1,133 @@
-# Ubuntu Security Tools Installation Script - Specification v3.0
+# Design notes
 
-## Overview
-Complete rewrite of the installation script with clean, modular, well-tested code.
-Keep the excellent i3/zsh/terminal configurations from the original.
+Why these scripts are built the way they are. The README covers usage; this
+covers the reasoning, so that a change doesn't quietly undo a decision that was
+made for a reason.
 
-## Requirements
+Applies to `kali-autodeploy-physical` and `kali-autodeploy-remote`. The Ubuntu
+scripts in `archive/` predate most of it.
 
-### Core Functionality
-1. Install security analysis tools for red teaming and pentesting
-2. Configure development environment (i3, polybar, kitty, zsh)
-3. Set up Python virtual environment with security tools
-4. Configure shell with useful aliases and functions
+## The requirement everything else follows from
 
-### Tools to Install
+These scripts exist to bring up a machine quickly. A run that dies halfway
+leaves a half-configured box, and the usual recovery is to reinstall the OS and
+start over — which costs more time than the script ever saved.
 
-#### System Packages (via apt)
-- **Build tools**: build-essential, git, curl, wget
-- **Python**: python3, python3-pip, python3-venv, pipx
-- **Libraries**: libssl-dev, libffi-dev, libpcap-dev, libgmp3-dev, libxml2-dev, libxslt1-dev
-- **Network tools**: nmap, ncat, smbclient, dnsutils, proxychains4, net-tools, binwalk
-- **System tools**: tmux, fonts-powerline, fonts-font-awesome
-- **Security tools**: hashcat, dnsrecon, python3-ldapdomaindump, adcli, nbtscan
-- **Java**: default-jre, openjdk-8-jre
-- **OpenCL**: ocl-icd-libopencl1, opencl-headers, clinfo
-- **GUI**: i3, i3status, i3lock, xss-lock, dmenu, polybar, kitty, zsh
-- **Snap**: snapd (for Obsidian)
+So the goal is not "install the tools". It is **finish, first time, or degrade
+into something still usable**. Every rule below is downstream of that.
 
-#### Python Tools (via pipx - user isolation)
-- **netexec**: Modern replacement for CrackMapExec
-- **impacket**: Python classes for network protocols (AD tools)
+## Rules
 
-#### Python Tools (via pip in venv)
-- **impacket** (from source): Latest version with all tools
-- **responder** (from source): LLMNR/NBT-NS/mDNS poisoner
-- **certipy-ad**: Active Directory certificate abuse
-- **Dependencies**: netifaces, aioquic, cryptography, pyasn1, ldap3, ldapdomaindump, flask, pyOpenSSL, pycryptodome
+### No `set -e`
 
-#### GUI/Environment
-- **Obsidian**: Note-taking app (via snap)
-- **i3 + polybar**: Window manager with status bar
-- **kitty**: GPU-accelerated terminal
-- **zsh + oh-my-zsh**: Shell with agnoster theme
+An installer should keep going when an optional piece fails. `set -u` and
+`pipefail` stay on; `set -e` does not. Every fallible step ends in `|| warn`,
+`|| true`, or sits inside an `if`.
 
-### Configuration Requirements
+This is not a style preference. Under `set -e`, v4 died at the first
+`apt-get install` because one package in a 40-name list had no installation
+candidate on that release — and installed nothing at all. Partial success beats
+an abort.
 
-#### i3 Configuration
-- Set kitty as default terminal
-- Configure polybar to replace i3bar
-- Copy existing i3 config sections from original script
+### Prefer curated package sets over hand-maintained lists
 
-#### Polybar Configuration
-- Status bar with system monitoring
-- Modules: workspaces, window title, CPU, memory, network, battery, date/time
-- Copy existing polybar config from original script
+`kali-autodeploy-physical` installs `kali-tools-*` metapackages rather than
+naming individual tools. Kali curates them and resolves their dependencies, so
+they survive rolling-release churn that a hand-listed set does not. A package
+name that no longer resolves is the single most common way a deploy dies.
 
-#### Kitty Configuration
-- Set zsh as default shell
-- Background opacity 0.95
-- 10000 line scrollback
-- Copy existing kitty config from original script
+Where a name must be listed individually, probe it with `apt_available` first so
+a rename is a warning, not a failure.
 
-#### Zsh Configuration
-- Install oh-my-zsh with agnoster theme
-- Enable plugins: git, docker, python, pip, nmap, ssh-agent, sudo, tmux, colored-man-pages, command-not-found, extract, z
-- Add all 50+ aliases and functions from original script
-- Configure PATH properly
-- Copy all aliases/functions from original script
+### Never assume a name resolves — including a metapackage
 
-### Script Architecture
+`apt_available` gates every install. `apt_install` falls back from a bulk
+install to one-at-a-time so a single bad name cannot take the batch with it.
 
-#### Structure
+### Idempotent, resumable phases
+
+Re-running must always be safe, so that a failure is recoverable by running the
+script again rather than by reimaging. Config writes are overwrite-with-backup;
+appends are marker-guarded; `--only` and `--skip` let a single failed phase be
+retried in isolation.
+
+### Never lock the operator out
+
+`kali-autodeploy-remote` will not disable SSH password authentication or enable
+the firewall unless it can prove another way in exists — an installed key, or
+Tailscale already up. A box that cannot reach itself is worse than one with
+password auth enabled.
+
+`kali-autodeploy-physical` inverts this: you have the keyboard, so default-deny
+inbound is enabled unconditionally.
+
+### Distro-native, no third-party repositories
+
+Everything comes from the distribution's own archive. No `/opt` virtualenv, no
+pipx-from-git, no `setcap` on a venv symlink, no external apt repositories.
+Mixing third-party repos into a rolling release is a known way to break it, and
+every tool these scripts need is already packaged.
+
+### Don't branch on distribution version
+
+`/etc/os-release` has no `VERSION_ID` on `kali-rolling`, so version-aware logic
+crashes under `set -u`. Probe for the capability instead of inferring it from a
+version number.
+
+### Leave the platform's own configuration alone
+
+Kali ships a tuned zsh. The script appends a marker-guarded block rather than
+installing a framework over the top — faster shell startup, cleanly removable,
+and no `sed` against a template that may not be there. v4 shipped exactly that
+bug: its theme and plugin edits silently no-opped whenever the expected template
+was absent.
+
+### Say what could not be verified
+
+Some things are only observable on real hardware — whether i3 actually starts,
+whether polybar finds `BAT0`, whether an adapter supports monitor mode. The
+script prints these as a checklist instead of reporting success it cannot
+confirm.
+
+## Structure
+
+Both scripts follow the same shape:
+
 ```
-1. Header & Documentation
-2. Core Functions
-   - print_status, print_error, print_warning
-   - check_root
-   - check_user
-   - install_apt_packages
-   - install_pipx_tool
-   - setup_venv
-   - configure_component
-3. Pre-flight Checks
-4. System Package Installation
-5. Python Tools (pipx)
-6. Python Tools (venv)
-7. GUI Configuration (i3, polybar, kitty)
-8. Shell Configuration (zsh, oh-my-zsh)
-9. Permission Fixes
-10. Verification
-11. Summary Report
+header/usage -> arg parsing -> logging -> helpers -> pre-flight
+  -> numbered phases -> verification
 ```
 
-#### Design Principles
-- **Modular**: Each component in its own function
-- **Testable**: Each function has single responsibility
-- **Robust**: Proper error handling, no silent failures
-- **Simple**: No over-engineering, straightforward logic
-- **Clean**: Clear naming, minimal comments needed
-- **Validated**: Check syntax at each step
+Shared helpers: `msg`/`warn`/`err` (warnings and errors to **stderr**, so they
+are never captured by a `$(...)` substitution), `get_real_user` /
+`get_user_home`, `apt_available` / `apt_install` / `apt_install_first`, and
+`check` for verification.
 
-### Error Handling
-- Exit on critical errors (no sudo, no internet)
-- Warn and continue on non-critical errors (optional packages)
-- All failures logged clearly
-- Return codes checked for all commands
+`kali-autodeploy-physical` adds `run()` and `write_file()` so `--dry-run` is
+honoured in one place rather than at every call site.
 
-### Testing Requirements
-- Syntax validation with `bash -n`
-- Dry-run capability (check what would be installed)
-- Per-component testing during development
-- No commits without passing tests
+## Testing
 
-### Success Criteria
-- Script runs without errors on fresh Ubuntu system
-- All tools installed and accessible
-- i3/polybar/kitty configuration identical to original
-- Zsh with all aliases and functions from original
-- Proper permissions (user can run all tools)
-- Clean, readable, maintainable code
+A deploy script's failure mode is a broken machine, which makes testing on the
+target useless — by the time you learn, you have already paid the cost. So
+everything testable is tested in a throwaway Kali container first, via
+`tests/`.
 
-## Implementation Plan
-1. Extract i3/polybar/kitty/zsh configs from original (copy verbatim)
-2. Create new script skeleton with functions
-3. Implement each section incrementally
-4. Test after each section
-5. Validate syntax continuously
-6. Document as we go
+The suite deliberately covers the *failure* paths, not just the happy one:
+injected unavailable packages, a missing systemd, bad arguments, repeated runs.
+It reads its package list from `--print-packages` so it cannot drift from the
+script.
 
-## Non-Goals
-- System updates (user does this separately)
-- Complex retry logic (keep it simple)
-- Rate limiting paranoia (not needed)
-- Over-engineering (KISS principle)
+Its value is not theoretical. It caught, before any hardware was touched, that
+`kali-desktop-i3` depends on `betterlockscreen`, which depends on
+`i3lock-color`, which both *Conflicts* and *Provides* `i3lock` — so naming
+`i3lock` explicitly made the entire package set unresolvable.
+
+## Non-goals
+
+- Configuring the user's dotfiles. That is a separate concern with its own repo.
+- Supporting every distribution. Kali for the current scripts, and the `archive/`
+  ones were Ubuntu.
+- Unattended interactive prompts. `DEBIAN_FRONTEND=noninteractive` plus explicit
+  debconf pre-seeding, because a package that asks a question hangs the run.
+- Reproducing a specific tool version set. These track the distribution.

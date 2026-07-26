@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Kali is a rolling release: a metapackage can be renamed, or a new
+  # dependency conflict introduced, without anything in this repo changing.
+  # The weekly container run is what surfaces that drift while you are at a
+  # desk rather than partway through a reimage.
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n + shellcheck
+        run: tests/run-tests.sh --static-only
+
+  container:
+    name: Kali container suite
+    # Slow (pulls kali-rolling and resolves the full package set), so it does
+    # not gate every push. Runs on the weekly schedule, on manual dispatch, and
+    # whenever a change actually touches the deploy script or the tests.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full suite against kalilinux/kali-rolling
+        run: tests/run-tests.sh

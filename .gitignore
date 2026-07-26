@@ -1,0 +1,20 @@
+# Deploy transcripts (the scripts write these to /var/log, but not if someone
+# redirects them here)
+*.log
+
+# Downloaded packages / release archives pulled during testing
+*.deb
+*.zip
+*.tar.gz
+
+# Never commit keys, engagement data, or environment files
+*.key
+*.pem
+id_*
+.env
+.env.*
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
