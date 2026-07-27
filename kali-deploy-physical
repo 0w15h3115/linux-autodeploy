@@ -136,6 +136,16 @@ DESKTOP_PKGS=(
     kitty
     xss-lock
     fonts-powerline
+
+    # i3 is a manual tiler: a third window in a horizontal container becomes a
+    # third column, forever. autotiling watches the focused window and sets the
+    # split along its longer axis, so a tall window splits horizontally and you
+    # get one wide pane beside a stack instead of endless columns.
+    #
+    # Not a master/stack layout -- i3 has no such thing, and this is a spiral,
+    # so a fourth window splits the third rather than joining a stack. It solves
+    # the endless-columns problem, not the "be awesome-wm" problem.
+    autotiling
 )
 
 readonly ALL_PHASES=(base tools desktop harden i3 polybar kitty shell dots wordlists)
@@ -685,6 +695,10 @@ bindsym $mod+r mode "resize"
 
 # Polybar
 exec_always --no-startup-id $HOME/.config/polybar/launch.sh
+
+# Split direction follows the focused window's shape, so a third window stacks
+# beside the second instead of becoming a third column. See DESKTOP_PKGS.
+exec_always --no-startup-id autotiling
 
 # Lock screen -- manual, and automatically after 5 min idle. On a conference
 # floor an unattended unlocked laptop is the whole threat model.
