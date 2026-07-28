@@ -756,6 +756,16 @@ fi
 # ------------------------------------------------------------------------------
 # Phase: dots -- the personal shell kit, cloned and left to install itself
 # ------------------------------------------------------------------------------
+#
+# On fonts: dots' prompt draws three Nerd Fonts private-use glyphs, and this
+# script installs no font and does not probe for one. That is deliberate, not an
+# oversight. This box is headless and reached over SSH, so the glyphs are
+# rendered by whatever terminal the operator is sitting at -- the font situation
+# here says nothing about what they will see. kali-deploy-physical does probe,
+# because a laptop renders its own terminal and the question has a local answer.
+#
+# If you connect from a terminal without a patched font and get tofu, set
+# VINNY_ASCII=1 in your environment and the prompt switches to plain characters.
 
 if should_run dots; then
     phase "Phase: dots"

@@ -512,6 +512,46 @@ if should_run desktop; then
             x-terminal-emulator /usr/bin/kitty 50 || true
         run update-alternatives --set x-terminal-emulator /usr/bin/kitty || true
     fi
+
+    # --- A patched font, so the dots prompt has glyphs to draw with.
+    #
+    # dots' prompt uses three codepoints from the Nerd Fonts private use area
+    # (U+F0054, U+E725, U+F4DF). Nothing in DESKTOP_PKGS can render them:
+    # fonts-powerline covers U+E0A0-E0D4 and stops, and Debian's
+    # fonts-jetbrains-mono is the *unpatched* upstream family, which has no PUA
+    # glyphs at all. The patched build ships only in the nerd-fonts GitHub
+    # release, so it is fetched rather than apt-installed -- the one network
+    # dependency in this phase.
+    #
+    # Deliberately non-fatal. If the fetch fails the shell phase probes for
+    # coverage and tells the prompt to fall back to ASCII, so a box with no
+    # network still ends up with a readable prompt rather than three tofu boxes.
+    NERD_FONT_VER="v3.4.0"
+    NERD_FONT_DIR="/usr/local/share/fonts/NerdFonts/JetBrainsMono"
+    NERD_FONT_URL="https://github.com/ryanoasis/nerd-fonts/releases/download/${NERD_FONT_VER}/JetBrainsMono.tar.xz"
+
+    if compgen -G "$NERD_FONT_DIR/*.ttf" >/dev/null 2>&1; then
+        msg "JetBrainsMono Nerd Font already installed"
+    elif (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} fetch $NERD_FONT_URL into $NERD_FONT_DIR"
+    else
+        msg "Installing JetBrainsMono Nerd Font ${NERD_FONT_VER}..."
+        NERD_TMP="$(mktemp -d)"
+        # --wildcards keeps the archive's licence and readme out of the font
+        # directory; fc-cache only wants the faces.
+        if curl -fsSL --retry 3 --connect-timeout 15 \
+                "$NERD_FONT_URL" -o "$NERD_TMP/JetBrainsMono.tar.xz" \
+           && mkdir -p "$NERD_FONT_DIR" \
+           && tar -xf "$NERD_TMP/JetBrainsMono.tar.xz" -C "$NERD_FONT_DIR" \
+                  --wildcards '*.ttf'; then
+            fc-cache -f "$NERD_FONT_DIR" >/dev/null 2>&1
+            msg "JetBrainsMono Nerd Font installed to $NERD_FONT_DIR"
+        else
+            warn "could not install the Nerd Font -- the prompt will use ASCII"
+            rm -rf "$NERD_FONT_DIR"
+        fi
+        rm -rf "$NERD_TMP"
+    fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -866,7 +906,11 @@ if should_run kitty; then
     KITTY_DIR="$USER_HOME/.config/kitty"
 
     write_file "$KITTY_DIR/kitty.conf" <<'KITTY'
-font_family      monospace
+# The desktop phase installs this face. If it is missing -- fetch failed, or
+# --only kitty on a box that never ran desktop -- kitty falls back to its own
+# default monospace and logs a warning, which is survivable: the prompt will
+# already be in ASCII mode because the shell phase probes for the same font.
+font_family      JetBrainsMono Nerd Font
 font_size        11.0
 shell            /usr/bin/zsh
 shell_integration enabled
@@ -918,6 +962,38 @@ if should_run shell; then
     elif (( DRY_RUN )); then
         echo -e "${YELLOW}[dry-run]${NC} append config block to $ZSHRC"
     else
+        # dots' prompt draws Nerd Fonts private-use glyphs. Ask fontconfig
+        # whether anything on this box can render one of them (U+F4DF), and if
+        # not, tell the prompt to use plain characters rather than leaving tofu
+        # on screen. Probed here, at the point of writing, so an idempotent
+        # re-run that changes nothing does not announce a decision it isn't
+        # making.
+        #
+        # Probed rather than assumed: --only shell can run on a box where the
+        # desktop phase never did, so the font may or may not be present
+        # regardless of what this script would have installed. A missing
+        # fc-list lands in the same branch, which is the right answer -- a box
+        # without fontconfig has no font to check.
+        #
+        # Correct for a laptop, which renders its own terminal. It would be
+        # actively wrong on a headless box reached over SSH, where the client's
+        # font decides what appears; kali-deploy-remote omits it for that
+        # reason.
+        #
+        # Command substitution, not `fc-list | grep -q`. Under `set -o pipefail`
+        # that pipeline is a race: grep -q exits at the first match, fc-list
+        # takes SIGPIPE, and pipefail reports the pipeline as failed -- so a box
+        # with a perfectly good font intermittently gets told it has none.
+        if [[ -n "$(fc-list ':charset=f4df' 2>/dev/null)" ]]; then
+            PROMPT_GLYPH_NOTE="# A Nerd Font is installed, so the dots prompt keeps its glyphs."
+            msg "Nerd Font coverage found -- dots prompt keeps its glyphs"
+        else
+            PROMPT_GLYPH_NOTE="# No font here covers the Nerd Fonts glyphs, so the dots prompt uses ASCII.
+# Delete this once a patched font is installed (deploy phase: desktop).
+export VINNY_ASCII=1"
+            warn "no Nerd Font coverage -- dots prompt will use ASCII"
+        fi
+
         cat >> "$ZSHRC" <<ZSHRC_BLOCK
 
 $ZSHRC_MARKER
@@ -927,6 +1003,8 @@ $ZSHRC_MARKER
 export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH"
 
 export ROCKYOU="/usr/share/wordlists/rockyou.txt"
+
+$PROMPT_GLYPH_NOTE
 
 # Security
 alias nse='ls /usr/share/nmap/scripts/ | grep'
