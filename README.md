@@ -6,8 +6,7 @@
 
 Automated deploy scripts for security workstations — Kali on hardware you sit at,
 Kali on a headless box you reach remotely, and a Tails live session stocked with
-pentest tooling over Tor. The two Kali scripts are validated against a real Kali
-container before they touch a machine.
+pentest tooling over Tor.
 
 > For authorized engagements, CTFs, and lab work only.
 
