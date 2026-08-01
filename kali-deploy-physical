@@ -728,9 +728,11 @@ default_floating_border pixel 2
 client.focused          #5c5f66 #3a3d42 #dadada #7f838a   #5c5f66
 
 # client.urgent was left at i3's own default (#900000, a harsh near-pure
-# red) -- it stood out badly against this palette. Amber instead: still
-# reads as "needs attention" without matching nothing else on the box.
-client.urgent           #d9a521 #3a3d42 #dadada #d9a521   #d9a521
+# red) -- it stood out badly against this palette. #B2A1C0 instead: the
+# same lavender polybar calls "primary" and dots' prompt.zsh uses for its
+# icon glyphs (VINNY_ICON) -- the one hue-distinct accent already in use
+# everywhere else on the box, rather than a new colour just for this.
+client.urgent           #b2a1c0 #3a3d42 #dadada #b2a1c0   #b2a1c0
 
 # Terminal
 bindsym $mod+Return exec kitty
