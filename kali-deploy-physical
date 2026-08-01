@@ -1122,40 +1122,60 @@ enable_audio_bell no
 # correctly. The owl (background_image + background_tint below) is drawn by
 # kitty itself onto its own opaque background and is unaffected by this value.
 background_opacity 1.0
-# Apprentice (from kitty's bundled theme catalog -- kitten themes ->
-# "Apprentice", by Romain Lafourcade). Applied directly here rather than
-# left to kitten themes because that kitten only writes to disk once a
-# selection is confirmed with Enter, a manual step a redeploy can't drive.
-# Muted/desaturated on a neutral grey background, closer to the original
-# #282828 than the neon themes in the same catalog.
-cursor                 #c7c7c7
-cursor_text_color      #feffff
-selection_foreground   #3e3e3e
-selection_background   #c1ddff
-foreground             #c8c8c8
-background             #323232
-color0                 #252525
-color8                 #555555
-color1                 #be7472
-color9                 #ff9900
-color2                 #709772
-color10                #97bb98
-color3                 #989772
-color11                #fefdbc
-color4                 #7199bc
-color12                #9fbdde
-color5                 #727399
-color13                #989abc
-color6                 #719899
-color14                #6fbbbc
-color7                 #7f7f7f
-color15                #feffff
+# Neowave Mocha -- not a catalog theme. This is the box's own scheme, the same
+# one Windows Terminal runs, and the ground the whole palette is tuned against:
+# background is #282828 exactly, which is what every contrast figure quoted in
+# this file and in dots/shell/zsh/prompt.zsh is computed on. A catalog theme
+# cannot be used here for that reason alone: it would ground somewhere else,
+# and moving the background is what cost the quiet greys their contrast the
+# last time it happened -- VINNY_DIM sits at 245 rather than 242 because of it.
+#
+# Applied directly rather than left to kitten themes because that kitten only
+# writes to disk once a selection is confirmed with Enter, a manual step a
+# redeploy cannot drive.
+foreground              #cdd6f4
+background              #282828
+selection_foreground    none
+selection_background    #3f3f3f
+cursor                  #89dceb
+cursor_text_color       #282828
+
+#: black
+color0                  #45475a
+color8                  #585b70
+#: red
+color1                  #f38ba8
+color9                  #eba0ac
+#: green
+color2                  #a6e3a1
+color10                 #94e2d5
+#: yellow
+color3                  #fab387
+color11                 #f9e2af
+#: blue
+color4                  #89dceb
+color12                 #74c7ec
+#: magenta
+color5                  #cba6f7
+color13                 #f5c2e7
+#: cyan
+color6                  #94e2d5
+color14                 #89dceb
+#: white
+color7                  #bac2de
+color15                 #cdd6f4
+
+# Window borders and the bell, kept in the same palette rather than left to
+# kitty's defaults, which are a saturated red/green that belong to nothing here.
+active_border_color     #cba6f7
+inactive_border_color   #3f3f3f
+bell_border_color       #fab387
 
 # Tab bar colors
-active_tab_foreground   #444444
-active_tab_background   #c1ddff
-inactive_tab_foreground #c8c8c8
-inactive_tab_background #282828
+active_tab_foreground   #282828
+active_tab_background   #cba6f7
+inactive_tab_foreground #bac2de
+inactive_tab_background #3f3f3f
 scrollback_lines 10000
 open_url_with    default
 detect_urls      yes
@@ -1536,10 +1556,10 @@ cat <<BANNER
     3. Mod is the Windows/Super key. Mod+Return = kitty, Mod+d = dmenu,
        Mod+Escape = lock. If Super does nothing, check the keyboard has one
        and that no other grabber (a VM client, a KVM switch) is eating it.
-    4. kitty is 90% opaque, which against a near-black wallpaper is subtle on
-       purpose -- the giveaway is the wallpaper's wordmark ghosting through as
-       a slightly lighter band across the middle of the window. Do not judge it
-       by eye; check the compositor is up:
+    4. kitty is fully opaque and needs no compositor to render correctly. The
+       owl behind the text is drawn by kitty itself onto its own background, so
+       it survives picom being down. If windows have no shadows and i3 looks
+       flat, that is the compositor, not kitty:
            pgrep -a picom
        If it is not running, start it by hand and read the error (a driver with
        no usable GLX backend is the usual one, and 'picom --backend xrender'
