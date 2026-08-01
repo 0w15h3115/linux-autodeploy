@@ -109,6 +109,27 @@ EXTRA_PKGS=(
     # that makes quitting lf leave you in the directory you ended up in.
     lf
 
+    # What the dots shell kit reaches for at runtime.
+    #
+    # dots writes the integrations for these and installs none of them -- its
+    # tools/install-tools.sh is opt-in and the dots phase deliberately does not
+    # run it, because that script also does a pipx install and three `go install`
+    # builds, which SPEC.md rules out here. So the tools have to arrive the same
+    # way lf does, from the distro.
+    #
+    # Without them the box deploys clean and the shell is half-wired: ^X^R recall
+    # answers "fzf not installed" -- the ledger, the index and the ghost text all
+    # unreachable -- `payload` the same, `denv` cannot auto-load an .envrc, `ll`
+    # falls back to plain ls, and `listen` drops to bare nc. Verified against the
+    # install closure: not one of these arrives with the metapackages.
+    #
+    # Debian ships bat's binary as batcat; dots' aliases already handle both.
+    fzf         # ^X^R recall, payload, and the Ctrl-R/Ctrl-T/Alt-C bindings
+    bat         # preview pane in payload and the recall picker
+    eza         # the ll alias
+    direnv      # denv -- per-engagement .envrc auto-load
+    rlwrap      # listen's readline upgrade, ahead of bare nc
+
     # AD / web tooling not covered by the metapackages above
     netexec
     mitm6

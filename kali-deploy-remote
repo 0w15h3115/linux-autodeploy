@@ -146,6 +146,28 @@ PKGS=(
     # package. The shell phase adds the `lfcd` wrapper that makes quitting lf
     # leave you in the directory you ended up in.
     lf
+
+    # What the dots shell kit reaches for at runtime.
+    #
+    # dots writes the integrations for these and installs none of them -- its
+    # tools/install-tools.sh is opt-in and the dots phase deliberately does not
+    # run it, because that script also does a pipx install and three `go install`
+    # builds, which SPEC.md rules out here. So they arrive from the distro, like
+    # everything else.
+    #
+    # Without them the box deploys clean and the shell is half-wired: ^X^R recall
+    # answers "fzf not installed" -- the ledger, the index and the ghost text all
+    # unreachable -- `payload` the same, `denv` cannot auto-load an .envrc, `ll`
+    # falls back to plain ls, and `listen` drops to bare nc. That matters more on
+    # this box than on the laptop, not less: the ledger it makes searchable is the
+    # record of what you did on a machine you were not sitting at.
+    #
+    # Debian ships bat's binary as batcat; dots' aliases already handle both.
+    fzf         # ^X^R recall, payload, and the Ctrl-R/Ctrl-T/Alt-C bindings
+    bat         # preview pane in payload and the recall picker
+    eza         # the ll alias
+    direnv      # denv -- per-engagement .envrc auto-load
+    rlwrap      # listen's readline upgrade, ahead of bare nc
 )
 
 # Added to the batch above on WSL only. PKGS is aimed at a box you drive from
