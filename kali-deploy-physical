@@ -194,6 +194,19 @@ DESKTOP_PKGS=(
     brightnessctl
     feh
     wireplumber
+
+    # Pillow, for the owl behind the terminal. dots' install.sh renders it from a
+    # tracked mask with terminal/mkowl.py, whose only dependency this is, and
+    # bails with "skip owl (needs Pillow)" when it is missing -- one line in a
+    # long install log, on a box that otherwise deployed perfectly.
+    #
+    # It is in the install closure today without being asked for: lf Recommends
+    # ueberzug, which Depends on it, and with 3000+ packages resolved there are
+    # likely other paths too. Listed here for the same reason brightnessctl and
+    # feh are -- something we ship drives it directly, so it should be a declared
+    # dependency rather than a lucky one, and its disappearance should be a
+    # resolution failure here instead of a missing wallpaper you notice later.
+    python3-pil
 )
 
 readonly ALL_PHASES=(base tools desktop harden i3 polybar kitty shell dots wordlists)
