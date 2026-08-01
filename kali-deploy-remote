@@ -17,6 +17,23 @@
 #     handled for you), with a hardened OpenSSH as fallback
 #   - ufw: default-deny inbound, allow only over the tailscale0 interface
 #
+# On WSL (detected automatically):
+#   A WSL instance is a headless Kali -- no display, and the terminal that draws
+#   it belongs to Windows -- which is why the WSL profile lives in this script
+#   and not in kali-deploy-physical. The phases that differ are the access
+#   layer, and they are skipped by default:
+#     tailscale  you run Tailscale on the Windows host; the tailnet is reachable
+#                from inside WSL without a second tailscaled here
+#     ssh        with `systemd = true` in wsl.conf, `systemctl enable ssh` takes
+#                effect -- a listening sshd on a box you enter with `wsl.exe`
+#     firewall   WSL2 is NAT'd behind the host, inbound is Windows Firewall's
+#                business, and rules naming tailscale0 stage an interface that
+#                will never exist here
+#   Everything else runs unchanged: the tmux config, the zshrc block (which
+#   already declines to probe for fonts, for the same reason it does over SSH),
+#   dots, and wordlists. The tools phase adds WSL_PKGS on top of PKGS.
+#   Force a skipped phase back on with --only <phase>.
+#
 # Usage:
 #   sudo ./kali-deploy-remote [options]
 #
@@ -131,6 +148,21 @@ PKGS=(
     lf
 )
 
+# Added to the batch above on WSL only. PKGS is aimed at a box you drive from
+# somewhere else; a WSL instance is the one you sit at all day, and web tooling
+# is the gap you notice first -- PKGS has no fuzzer and no injection tool.
+#
+# --print-packages prints these unconditionally (the help says every package the
+# script CAN install), which is what keeps them honest: the container suite runs
+# on an image that is not WSL, so T1 and T2 still prove they resolve and that
+# the combined set is installable. A WSL-only array that only appeared on WSL
+# would be the one part of the package set no test ever looked at.
+WSL_PKGS=(
+    ffuf
+    gobuster
+    sqlmap
+)
+
 readonly ALL_PHASES=(base tools tailscale ssh firewall tmux shell dots wordlists)
 
 # Binaries the verification pass ticks at the end of a run. BINARY names, not
@@ -243,6 +275,28 @@ is_phase() {
     return 1
 }
 
+# True inside a WSL instance.
+#
+# Keyed on userspace artifacts, never on the kernel name alone. A container
+# shares its host's kernel, so on a WSL2 host /proc/sys/kernel/osrelease reads
+# "...-microsoft-standard-WSL2" inside every container too -- including the one
+# this repo's own test suite runs in. A bare `grep microsoft` there would skip
+# the access-layer phases in the tests that exist to check them, and would do it
+# only on a WSL developer's machine, never in CI. That is a test that passes for
+# the wrong reason, which is worse than one that fails.
+#
+# /run/WSL and /mnt/wsl are created by the WSL2 init inside the instance and are
+# absent in a container on the same host (verified both ways). WSL1 has neither,
+# so it falls back to the WSL /init plus the kernel string -- a pair a container
+# cannot produce, since it has no /init.
+#
+# $WSL_DISTRO_NAME is deliberately unused: sudo scrubs it from the environment,
+# so it is empty exactly when this script runs.
+is_wsl() {
+    [[ -d /run/WSL || -d /mnt/wsl ]] && return 0
+    [[ -e /init ]] && grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null
+}
+
 # True if apt has an installation candidate for the package on THIS system.
 # Lets us skip packages that were renamed/removed instead of aborting the batch.
 apt_available() {
@@ -309,7 +363,7 @@ while (( $# )); do
         # harness reads its package list from here so it can never drift out of
         # sync with the array above.
         --print-packages)
-                        printf '%s\n' "${PKGS[@]}"; exit 0 ;;
+                        printf '%s\n' "${PKGS[@]}" "${WSL_PKGS[@]}"; exit 0 ;;
         # Every binary the verification pass ticks. T9 cross-checks these
         # against the install closure of --print-packages.
         --print-checked-binaries)
@@ -323,6 +377,24 @@ done
 # The older SKIP_* environment knobs map onto the phase model.
 [[ "${SKIP_TAILSCALE:-0}" == "1" ]] && SKIP_PHASES+=(tailscale)
 [[ "${SKIP_UFW:-0}"       == "1" ]] && SKIP_PHASES+=(firewall)
+
+# WSL: the whole access layer is wrong here, not merely redundant -- see the
+# header. Expressed as default skips rather than as `if is_wsl` guards inside
+# each phase, so it shows up in the pre-flight "Skipping:" line like any other
+# skip, and so --only still forces a phase back on (should_run checks
+# ONLY_PHASES first and never consults this list).
+#
+# Appended only if absent: --skip ssh on a WSL box would otherwise print the
+# phase twice in the pre-flight summary.
+IS_WSL=0
+if is_wsl; then
+    IS_WSL=1
+    for wp in tailscale ssh firewall; do
+        wp_present=0
+        for sp in "${SKIP_PHASES[@]}"; do [[ "$sp" == "$wp" ]] && wp_present=1; done
+        (( wp_present )) || SKIP_PHASES+=("$wp")
+    done
+fi
 
 for p in "${SKIP_PHASES[@]}" "${ONLY_PHASES[@]}"; do
     is_phase "$p" || { err "unknown phase: $p"; err "valid: ${ALL_PHASES[*]}"; exit 1; }
@@ -365,6 +437,11 @@ if [[ "$distro_id" != "kali" ]]; then
     warn "Continuing anyway -- every package is probed before install."
 else
     msg "Distro:    Kali"
+fi
+
+if (( IS_WSL )); then
+    msg "Target:    WSL ($(cat /proc/sys/kernel/osrelease 2>/dev/null))"
+    msg "           access layer skipped (tailscale/ssh/firewall); --only forces one back on"
 fi
 
 (( ${#SKIP_PHASES[@]} )) && msg "Skipping:  ${SKIP_PHASES[*]}"
@@ -421,8 +498,14 @@ if should_run tools; then
 
     export DEBIAN_FRONTEND=noninteractive
 
-    msg "Installing ${#PKGS[@]} packages from the Kali repos..."
-    apt_install "${PKGS[@]}"
+    install_pkgs=("${PKGS[@]}")
+    if (( IS_WSL )); then
+        install_pkgs+=("${WSL_PKGS[@]}")
+        msg "WSL: adding ${WSL_PKGS[*]}"
+    fi
+
+    msg "Installing ${#install_pkgs[@]} packages from the Kali repos..."
+    apt_install "${install_pkgs[@]}"
 
     # Headless: no GUI deps. default-jre-headless tracks the current default
     # JDK; the explicit names are only fallbacks.

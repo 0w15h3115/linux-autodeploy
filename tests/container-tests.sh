@@ -599,6 +599,70 @@ else
     tail -10 /tmp/rskip.log | sed 's/^/    /'
 fi
 
+# ------------------------------------------------------------------------------
+head_ "R8: the WSL profile fires on WSL, and only on WSL"
+# ------------------------------------------------------------------------------
+# This container is not WSL -- but it may well be running ON a WSL2 host, and a
+# container shares its host's kernel, so /proc/sys/kernel/osrelease reads
+# "microsoft" in here whenever a developer runs the suite from WSL. The baseline
+# below is the regression test for that. Detection has to key on WSL's userspace
+# (/run/WSL, /mnt/wsl, /init), never on the kernel name alone, or the access
+# layer silently stops being tested on exactly one machine: the maintainer's.
+
+as_sudo --dry-run >/tmp/rwsl-base.log 2>&1
+grep -q 'Target:.*WSL' /tmp/rwsl-base.log \
+    && fail "container mistaken for WSL (kernel string leaked into detection?)" \
+    || pass "a container on a WSL host is not mistaken for WSL"
+grep -q '=== Phase: tailscale ===' /tmp/rwsl-base.log \
+    && pass "access layer still runs when not on WSL" \
+    || fail "tailscale phase skipped on a box that is not WSL"
+grep -q 'ffuf' /tmp/rwsl-base.log \
+    && fail "WSL_PKGS installed on a box that is not WSL" \
+    || pass "WSL_PKGS held back when not on WSL"
+
+# /run/WSL is a plain directory created by the WSL2 init, so the positive path
+# is testable without a WSL kernel.
+mkdir -p /run/WSL
+as_sudo --dry-run >/tmp/rwsl-on.log 2>&1
+grep -q 'Target:.*WSL' /tmp/rwsl-on.log \
+    && pass "WSL detected via /run/WSL" \
+    || fail "WSL not detected despite /run/WSL"
+
+wsl_ran=""
+for p in tailscale ssh firewall; do
+    grep -q "=== Phase: $p ===" /tmp/rwsl-on.log && wsl_ran="$wsl_ran $p"
+done
+[[ -z "$wsl_ran" ]] \
+    && pass "access layer skipped on WSL (tailscale/ssh/firewall)" \
+    || fail "ran on WSL and should not have:$wsl_ran"
+
+wsl_missing=""
+for p in base tools tmux shell dots wordlists; do
+    grep -q "=== Phase: $p ===" /tmp/rwsl-on.log || wsl_missing="$wsl_missing $p"
+done
+[[ -z "$wsl_missing" ]] \
+    && pass "every other phase still runs on WSL" \
+    || fail "WSL profile also dropped:$wsl_missing"
+
+grep -q 'ffuf' /tmp/rwsl-on.log \
+    && pass "WSL_PKGS added to the install set on WSL" \
+    || fail "WSL_PKGS missing from the install set on WSL"
+
+# --only is the documented escape hatch: should_run consults ONLY_PHASES before
+# it ever looks at the skip list, so a WSL default skip must not survive it.
+as_sudo --only ssh --dry-run >/tmp/rwsl-only.log 2>&1
+grep -q '=== Phase: ssh ===' /tmp/rwsl-only.log \
+    && pass "--only ssh overrides the WSL skip" \
+    || fail "--only ssh did not run the ssh phase on WSL"
+
+# An explicit --skip of a phase WSL already skips must not list it twice.
+n=$(as_sudo --skip ssh --dry-run 2>&1 | grep -c 'Skipping:.*ssh.*ssh')
+(( n == 0 )) \
+    && pass "explicit --skip of a WSL-skipped phase is not doubled" \
+    || fail "phase listed twice in the pre-flight summary"
+
+rmdir /run/WSL
+
 t_bad_input
 
 # ==============================================================================

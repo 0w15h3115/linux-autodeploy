@@ -16,6 +16,7 @@ pentest tooling over Tor.
 |---|---|---|---|
 | **`kali-deploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
 | **`kali-deploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
+| **`kali-deploy-remote`** *(on WSL)* | Kali under WSL2 — same script, detected | none | none; the access layer is skipped |
 | **`test-with-tails`** *(beta)* | Tails OS live session | Tails' own GNOME | everything over Tor; nothing persists |
 
 Superseded Ubuntu scripts live in [`archive/`](archive/). `SPEC.md` covers the
@@ -202,6 +203,35 @@ what's broken — connect with `NO_AUTO_TMUX=1`.
 A full transcript goes to `/var/log/kali-deploy-remote-<timestamp>.log`.
 
 See `TMUX-TAILSCALE-CHEATSHEET.md`.
+
+### Kali on WSL
+
+Run the same script — it detects WSL and adjusts itself:
+
+```bash
+sudo ./kali-deploy-remote
+```
+
+A WSL instance is a headless Kali, which is why this lives here rather than in the
+physical script: there is no display, and the terminal drawing it is a Windows
+application, so the font probe the physical script does would answer a question about
+the wrong machine. Only the access layer differs, and it is skipped by default —
+`tailscale` (run Tailscale on the Windows host instead), `ssh` (with `systemd = true`
+in `wsl.conf`, enabling sshd actually takes effect, on a box you enter with
+`wsl.exe`), and `firewall` (WSL2 is NAT'd behind the host; rules naming `tailscale0`
+stage an interface that will never exist). Force one back on with `--only <phase>`.
+
+The tools phase adds `WSL_PKGS` — `ffuf`, `gobuster`, `sqlmap` — on top of the
+headless set, since a WSL box is a workstation and web tooling is the gap you notice
+first.
+
+Detection keys on WSL's userspace (`/run/WSL`, `/mnt/wsl`, `/init`), never on the
+kernel name: a container shares its host's kernel, so `/proc/sys/kernel/osrelease`
+says `microsoft` inside every container on a WSL2 host — including the one this
+repo's tests run in. R8 pins both directions.
+
+For glyphs in the prompt, install the patched font on the *Windows* side and point
+Windows Terminal at it; `VINNY_ASCII=1` is the fallback.
 
 ---
 
