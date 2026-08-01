@@ -727,6 +727,11 @@ default_floating_border pixel 2
 #                       border  bground text    indicator child_border
 client.focused          #5c5f66 #3a3d42 #dadada #7f838a   #5c5f66
 
+# client.urgent was left at i3's own default (#900000, a harsh near-pure
+# red) -- it stood out badly against this palette. Amber instead: still
+# reads as "needs attention" without matching nothing else on the box.
+client.urgent           #d9a521 #3a3d42 #dadada #d9a521   #d9a521
+
 # Terminal
 bindsym $mod+Return exec kitty
 
@@ -1096,58 +1101,40 @@ enable_audio_bell no
 # correctly. The owl (background_image + background_tint below) is drawn by
 # kitty itself onto its own opaque background and is unaffected by this value.
 background_opacity 1.0
-# Pastel Cyberpunk (from kitty's bundled theme catalog -- kitten themes ->
-# "Pastel Cyberpunk"). Applied directly here rather than left to kitten
-# themes because that kitten only writes to disk once a selection is
-# confirmed with Enter, a manual step a redeploy can't drive.
-#
-# Caveat: this background (#333b4b) no longer matches polybar/i3lock's
-# #282828, and dots' prompt.zsh pins VINNY_DIM=245 against #282828
-# specifically (242 measured 2.81:1 there, under the 3:1 floor) -- that
-# floor has not been re-measured against this background. Bring
-# polybar/i3lock's background in line, or re-derive VINNY_DIM, if the
-# mismatch matters to you.
-foreground             #3fcbd2
-cursor                 #3fcbd2
-selection_background   #4e6e9c
-selection_foreground   #36c8d0
-background             #333b4b
-
-# Black, Gray, Silver, White
-color0                 #38404f
-color8                 #4d83cf
-color7                 #3fcbd2
-color15                #3bcad1
-
-# Red
-color1                 #ff3838
-color9                 #ff3333
-
-# Green (Magenta in original)
-color2                 #dc38d0
-color10                #db33cf
-
-# Yellow (Orange)
-color3                 #f79538
-color11                #ff7899
-
-# Blue
-color4                 #4b6c9b
-color12                #38ff38
-
-# Purple
-color5                 #904da9
-color13                #8d49a7
-
-# Cyan
-color6                 #3fcbd2
-color14                #3bcad1
+# Apprentice (from kitty's bundled theme catalog -- kitten themes ->
+# "Apprentice", by Romain Lafourcade). Applied directly here rather than
+# left to kitten themes because that kitten only writes to disk once a
+# selection is confirmed with Enter, a manual step a redeploy can't drive.
+# Muted/desaturated on a neutral grey background, closer to the original
+# #282828 than the neon themes in the same catalog.
+cursor                 #c7c7c7
+cursor_text_color      #feffff
+selection_foreground   #3e3e3e
+selection_background   #c1ddff
+foreground             #c8c8c8
+background             #323232
+color0                 #252525
+color8                 #555555
+color1                 #be7472
+color9                 #ff9900
+color2                 #709772
+color10                #97bb98
+color3                 #989772
+color11                #fefdbc
+color4                 #7199bc
+color12                #9fbdde
+color5                 #727399
+color13                #989abc
+color6                 #719899
+color14                #6fbbbc
+color7                 #7f7f7f
+color15                #feffff
 
 # Tab bar colors
-active_tab_foreground   #eeeeee
-active_tab_background   #384254
-inactive_tab_foreground #47cdd4
-inactive_tab_background #383f4a
+active_tab_foreground   #444444
+active_tab_background   #c1ddff
+inactive_tab_foreground #c8c8c8
+inactive_tab_background #282828
 scrollback_lines 10000
 open_url_with    default
 detect_urls      yes
