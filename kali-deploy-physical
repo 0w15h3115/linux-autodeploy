@@ -1096,11 +1096,58 @@ enable_audio_bell no
 # correctly. The owl (background_image + background_tint below) is drawn by
 # kitty itself onto its own opaque background and is unaffected by this value.
 background_opacity 1.0
-# #282828, not #1e1e1e. dots' prompt palette is tuned against this exact value --
-# shell/zsh/prompt.zsh pins VINNY_DIM at 245 rather than 242 because 242 fell to
-# 2.81:1 against it, under the 3:1 floor. Same background in polybar and in
-# i3lock, so the whole desktop is one colour rather than three near-misses.
-background       #282828
+# Pastel Cyberpunk (from kitty's bundled theme catalog -- kitten themes ->
+# "Pastel Cyberpunk"). Applied directly here rather than left to kitten
+# themes because that kitten only writes to disk once a selection is
+# confirmed with Enter, a manual step a redeploy can't drive.
+#
+# Caveat: this background (#333b4b) no longer matches polybar/i3lock's
+# #282828, and dots' prompt.zsh pins VINNY_DIM=245 against #282828
+# specifically (242 measured 2.81:1 there, under the 3:1 floor) -- that
+# floor has not been re-measured against this background. Bring
+# polybar/i3lock's background in line, or re-derive VINNY_DIM, if the
+# mismatch matters to you.
+foreground             #3fcbd2
+cursor                 #3fcbd2
+selection_background   #4e6e9c
+selection_foreground   #36c8d0
+background             #333b4b
+
+# Black, Gray, Silver, White
+color0                 #38404f
+color8                 #4d83cf
+color7                 #3fcbd2
+color15                #3bcad1
+
+# Red
+color1                 #ff3838
+color9                 #ff3333
+
+# Green (Magenta in original)
+color2                 #dc38d0
+color10                #db33cf
+
+# Yellow (Orange)
+color3                 #f79538
+color11                #ff7899
+
+# Blue
+color4                 #4b6c9b
+color12                #38ff38
+
+# Purple
+color5                 #904da9
+color13                #8d49a7
+
+# Cyan
+color6                 #3fcbd2
+color14                #3bcad1
+
+# Tab bar colors
+active_tab_foreground   #eeeeee
+active_tab_background   #384254
+inactive_tab_foreground #47cdd4
+inactive_tab_background #383f4a
 scrollback_lines 10000
 open_url_with    default
 detect_urls      yes
