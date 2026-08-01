@@ -457,6 +457,99 @@ PSRC
     rm -rf "$USER_HOME/.config/picom" /etc/xdg/picom.conf
 }
 
+# T13 -- the lock screen and the greeter, which are meant to be one look.
+#
+# Neither can be seen without a display, so what is asserted here is the wiring:
+# the two configs exist, agree on the same image and the same palette, and the
+# locker cannot end up with no fallback on one of its two entry points.
+t_lock_and_greeter() {
+    head_ "T13: lock screen and greeter are configured as one"
+
+    as_sudo --only i3 >/tmp/lock1.log 2>&1
+
+    local wrapper=/usr/local/bin/owl-lock
+    local rc="$USER_HOME/.config/betterlockscreen/betterlockscreenrc"
+    local gconf=/etc/lightdm/lightdm-gtk-greeter.conf
+    local gcss=/usr/share/themes/owlshells/gtk-3.0/gtk.css
+    local i3conf="$USER_HOME/.config/i3/config"
+
+    [[ -x "$wrapper" ]] \
+        && pass "owl-lock wrapper is executable" \
+        || fail "owl-lock missing or not executable"
+
+    grep -q 'i3lock -c 282828' "$wrapper" 2>/dev/null \
+        && pass "owl-lock falls back to plain i3lock" \
+        || fail "owl-lock has no fallback -- a missing cache would leave the screen unlocked"
+
+    # The asymmetry this wrapper exists to prevent: xss-lock takes a command,
+    # not a shell expression, so a fallback written inline on the bindsym line
+    # would protect the keybinding and silently not protect the idle timeout.
+    # Both must route through the wrapper.
+    local bind_ok=0 idle_ok=0
+    grep -qE '^bindsym .*\$mod\+Escape .*owl-lock' "$i3conf" && bind_ok=1
+    grep -qE '^exec .*xss-lock .*owl-lock' "$i3conf" && idle_ok=1
+    if (( bind_ok && idle_ok )); then
+        pass "both the keybinding and xss-lock route through owl-lock"
+    else
+        fail "lock paths diverge (bindsym=$bind_ok xss-lock=$idle_ok)"
+        grep -nE 'owl-lock|xss-lock|Escape' "$i3conf" | sed 's/^/      /'
+    fi
+
+    # 4.4.0 still reads ~/.config/betterlockscreenrc but prints a migration
+    # error on every single invocation, so the XDG path is the only correct one.
+    [[ -f "$rc" ]] \
+        && pass "betterlockscreenrc is at the non-deprecated XDG path" \
+        || fail "no rc at $rc"
+    [[ ! -f "$USER_HOME/.config/betterlockscreenrc" ]] \
+        && pass "nothing written to the deprecated rc path" \
+        || fail "wrote the deprecated ~/.config/betterlockscreenrc"
+
+    grep -q 'no-unlock-indicator' "$rc" 2>/dev/null \
+        && pass "the unlock ring is suppressed" \
+        || fail "no --no-unlock-indicator -- the ring will be drawn"
+
+    # lockargs must append: betterlockscreen sets lockargs=(-n) before sourcing
+    # this file, and losing -n breaks xss-lock.
+    grep -q 'lockargs+=(' "$rc" 2>/dev/null \
+        && pass "lockargs appends rather than replacing (-n survives)" \
+        || fail "lockargs assigned rather than appended -- would drop -n/nofork"
+
+    [[ -f "$gconf" ]] \
+        && pass "greeter config written" \
+        || fail "no $gconf"
+
+    grep -q '^hide-user-image=true' "$gconf" 2>/dev/null \
+        && pass "the greeter's avatar circle is hidden" \
+        || fail "avatar circle not hidden"
+
+    [[ -f "$gcss" ]] \
+        && pass "greeter GTK theme written (its only route to custom colour)" \
+        || fail "no $gcss -- theme-name points at nothing"
+
+    # The whole point: one image, both surfaces, and a path the lightdm user can
+    # actually read. Anything under $USER_HOME is silently never drawn.
+    local img=/usr/share/backgrounds/owlshells/lock.png
+    grep -q "^background=$img" "$gconf" 2>/dev/null \
+        && pass "greeter points at the shared image" \
+        || fail "greeter background is not the shared image"
+    grep -qE "^background=$USER_HOME|^background=~" "$gconf" 2>/dev/null \
+        && fail "greeter background is under \$HOME -- lightdm cannot read it" \
+        || pass "greeter background is outside \$HOME"
+
+    # Palette parity: the accents must be the prompt's, on both sides.
+    local c miss=0
+    for c in 83A0A4 B2A1C0 FF2D2D; do
+        grep -qi "$c" "$rc" || { fail "lock screen is missing palette colour #$c"; miss=1; }
+    done
+    (( miss )) || pass "lock screen carries the prompt palette"
+
+    miss=0
+    for c in 83A0A4 B2A1C0 FF2D2D; do
+        grep -qi "$c" "$gcss" || { fail "greeter theme is missing palette colour #$c"; miss=1; }
+    done
+    (( miss )) || pass "greeter carries the same palette"
+}
+
 # T8 -- bad input is rejected, and --help stays clean.
 t_bad_input() {
     head_ "T8: bad input is rejected"
@@ -559,6 +652,7 @@ t_idempotent_shell '>>> kali-deploy-physical >>>'
 t_dots_phase '>>> kali-deploy-physical >>>'
 t_wallpaper
 t_picom_conf
+t_lock_and_greeter
 
 as_sudo --only i3 --only polybar --only kitty >/tmp/rerun.log 2>&1 \
     && pass "config phases re-run cleanly" \

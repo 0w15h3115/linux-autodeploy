@@ -923,13 +923,227 @@ bindsym XF86AudioMicMute     exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_
 
 # Lock screen -- manual, and automatically after 5 min idle. On a conference
 # floor an unattended unlocked laptop is the whole threat model.
-bindsym $mod+Escape exec i3lock -c 282828
-exec --no-startup-id xss-lock --transfer-sleep-lock -- i3lock -c 282828 --nofork
+#
+# betterlockscreen wraps i3lock-color: it caches a scaled copy of the lock image
+# per resolution and passes the styling from ~/.config/betterlockscreenrc, which
+# is a great deal of i3lock-color flags not to have to carry on this line.
+#
+# Both paths go through owl-lock, a two-line wrapper this script writes, rather
+# than calling betterlockscreen directly. betterlockscreen -l fails closed when
+# its cache is missing -- and leaves the screen UNLOCKED. That is the one
+# outcome this binding must never produce, so the wrapper falls back to plain
+# i3lock. Putting it in a script rather than on the bindsym line is what lets
+# the xss-lock path have the same fallback: xss-lock takes a command, not a
+# shell expression, so `a || b` written here would protect the keybinding and
+# silently not protect the idle timeout.
+#
+# The cache is built by the dots phase. Rebuilt here when absent because
+# betterlockscreen -u shells out to xrandr, so it cannot run at deploy time from
+# a TTY or over SSH -- only from inside a session, which is what this is.
+exec --no-startup-id [ -d $HOME/.cache/betterlockscreen ] || \
+    betterlockscreen -u /usr/share/backgrounds/owlshells/lock.png
+
+bindsym $mod+Escape exec --no-startup-id owl-lock
+exec --no-startup-id xss-lock --transfer-sleep-lock -- owl-lock
 exec --no-startup-id xset s 300 300
 I3CONFIG
 
     run chown -R "$REAL_USER:$REAL_USER" "$I3_DIR"
     msg "i3 config written to $I3_DIR/config"
+
+    # The locker wrapper. Both the keybinding and xss-lock call this, so the
+    # fallback covers the idle path too -- see the i3 config above for why that
+    # cannot be done with `||` on the bindsym line.
+    #
+    # exec, not a subshell: xss-lock signals the locker to tell it the screen is
+    # actually locked, and a wrapper that stays in the middle would swallow that.
+    write_file /usr/local/bin/owl-lock 755 <<'OWLLOCK'
+#!/bin/sh
+# Written by kali-deploy-physical. Locks with betterlockscreen, falling back to
+# plain i3lock: betterlockscreen -l exits non-zero when its cache is missing and
+# would otherwise leave the screen unlocked, which is the one thing a lock
+# binding must never do.
+exec betterlockscreen -l 2>/dev/null || exec i3lock -c 282828 -n
+OWLLOCK
+    msg "lock wrapper written to /usr/local/bin/owl-lock"
+
+    # betterlockscreen's theme. Colours are RRGGBBAA, and they are the prompt
+    # palette: seafoam ring to match polybar's accent, lavender while verifying,
+    # the pinned alert red for a wrong password. Same values the bar and the
+    # prompt use, so the locked screen is recognisably the same machine.
+    #
+    # solid_color is the fallback ground when no image has been cached, and is
+    # #282828 like everything else. No dim or blur effect is applied: the greeter
+    # shows this same image untreated, and a lock screen that dims while the
+    # login screen does not is the mismatch this whole exercise is about.
+    write_file "$USER_HOME/.config/betterlockscreen/betterlockscreenrc" <<'BLSRC'
+# Written by kali-deploy-physical. Delete to fall back to betterlockscreen's own.
+#
+# This path, not ~/.config/betterlockscreenrc: 4.4.0 sources the old location but
+# prints a migration error to stderr every single time it runs.
+display_on=0
+span_image=false
+lock_timeout=300
+fx_list=(dim blur dimblur pixel dimpixel color)
+dim_level=40
+blur_level=1
+pixel_scale=10,1000
+solid_color=282828
+wallpaper_cmd="feh --bg-fill"
+quiet=false
+
+# The prompt palette -- dots/shell/zsh/prompt.zsh
+loginbox=282828cc
+loginshadow=00000000
+locktext="locked"
+font="JetBrainsMono Nerd Font"
+ringcolor=83A0A4ff
+insidecolor=28282800
+separatorcolor=00000000
+ringvercolor=B2A1C0ff
+insidevercolor=28282800
+ringwrongcolor=FF2D2Dff
+insidewrongcolor=FF2D2D33
+timecolor=DADADAff
+time_format="%H:%M"
+greetercolor=8A8A8Aff
+layoutcolor=8A8A8Aff
+keyhlcolor=B2A1C0ff
+bshlcolor=FF2D2Dff
+veriftext="checking"
+verifcolor=B2A1C0ff
+wrongtext="no"
+wrongcolor=FF2D2Dff
+modifcolor=B2A1C0ff
+bgcolor=282828ff
+
+# No ring. betterlockscreen hardcodes --radius/--ring-width, so the circle can
+# only be removed from this side: -u/--no-unlock-indicator suppresses the arc in
+# draw_indic(). The clock and the greeter text are built outside that guard and
+# survive it, and betterlockscreen already passes --force-clock, so the time
+# stays up with the indicator gone.
+#
+# This appends rather than replaces: betterlockscreen sets lockargs=(-n) before
+# it sources this file, and -n (nofork) is what keeps xss-lock working.
+#
+# The greeter has no ring to mirror, so dropping it here is also what makes the
+# two screens the same picture with the same text over it, and nothing else.
+lockargs+=(--no-unlock-indicator)
+BLSRC
+    run chown -R "$REAL_USER:$REAL_USER" "$USER_HOME/.config/betterlockscreen"
+    msg "lock screen theme written to $USER_HOME/.config/betterlockscreen/betterlockscreenrc"
+
+    # The greeter. Same image and same palette as the lock screen, because they
+    # are the same moment as far as anyone looking at the laptop is concerned.
+    #
+    # The image is at a /usr/share path rather than in $HOME because the greeter
+    # runs as the `lightdm` user and cannot read your home directory at all --
+    # a background under ~/ is simply never drawn, with nothing logged. The dots
+    # phase publishes it there; if that phase skipped, background falls back to
+    # the flat #282828 below and the greeter still comes up.
+    #
+    # hide-user-image kills the avatar circle. round-user-image is set too, so
+    # that a box where an avatar does exist doesn't reintroduce a circle.
+    write_file /etc/lightdm/lightdm-gtk-greeter.conf <<'GREETER'
+# Written by kali-deploy-physical.
+[greeter]
+background=/usr/share/backgrounds/owlshells/lock.png
+user-background=false
+theme-name=owlshells
+icon-theme-name=Adwaita
+font-name=JetBrainsMono Nerd Font 11
+xft-antialias=true
+xft-hintstyle=slight
+xft-rgba=rgb
+hide-user-image=true
+round-user-image=false
+position=50% 62%
+clock-format=%H:%M
+indicators=~spacer;~clock;~spacer;~session;~power
+GREETER
+    msg "greeter config written to /etc/lightdm/lightdm-gtk-greeter.conf"
+
+    # The greeter's colours. lightdm-gtk-greeter has no "load this CSS" option --
+    # its sample CSS ships as documentation, not as a config path -- so the only
+    # way in is a GTK theme it can be pointed at by name. This is a theme in the
+    # minimum sense: a gtk.css that inherits nothing and styles the four widgets
+    # the greeter actually draws.
+    #
+    # /usr/share/themes because, again, the lightdm user has to be able to read
+    # it. Named widgets come from the upstream sample; the palette is the prompt's.
+    write_file /usr/share/themes/owlshells/gtk-3.0/gtk.css <<'GREETERCSS'
+/* Written by kali-deploy-physical. The prompt palette, on the greeter. */
+
+/* The window sits on the owl, so it needs its own ground to stay readable --
+   #282828 at 90%, the same colour the image is mounted on. */
+#login_window,
+#shutdown_dialog,
+#restart_dialog {
+    background-color: rgba(40, 40, 40, 0.90);
+    border: 1px solid #3A3D42;
+    border-radius: 2px;
+    color: #DADADA;
+}
+
+/* Password and user fields. Flat, with a seafoam underline that brightens to
+   lavender on focus -- the two accents the bar and the prompt already use. */
+#login_window entry {
+    background-color: rgba(58, 61, 66, 0.85);
+    border: none;
+    border-bottom: 2px solid #83A0A4;
+    border-radius: 0;
+    color: #DADADA;
+    padding: 6px 8px;
+}
+
+#login_window entry:focus {
+    border-bottom-color: #B2A1C0;
+}
+
+#login_window button {
+    background-image: none;
+    background-color: transparent;
+    border: 1px solid #3A3D42;
+    border-radius: 2px;
+    color: #88A9B5;
+}
+
+#login_window button:hover {
+    border-color: #B2A1C0;
+    color: #B2A1C0;
+}
+
+/* Wrong password. The one pinned colour in the palette. */
+#login_window #position_label,
+.lightdm-gtk-greeter label#error_label {
+    color: #FF2D2D;
+}
+
+/* The top panel: clock, session and power menus. Quiet -- it is not what you
+   came here to look at. */
+#panel_window {
+    background-color: rgba(40, 40, 40, 0.85);
+    color: #8A8A8A;
+    box-shadow: inset 0 -1px #3A3D42;
+}
+
+#panel_window .menubar,
+#panel_window .menubar > .menuitem {
+    background-color: transparent;
+    color: #8A8A8A;
+}
+
+#panel_window .menubar > .menuitem:hover {
+    color: #B2A1C0;
+}
+
+/* The ground behind everything, for the case where the image is missing. */
+.lightdm-gtk-greeter {
+    background-color: #282828;
+    color: #DADADA;
+}
+GREETERCSS
+    msg "greeter theme written to /usr/share/themes/owlshells/gtk-3.0/gtk.css"
 
     # picom's config, derived from Kali's rather than written from scratch.
     #
@@ -1479,6 +1693,30 @@ if should_run dots; then
         # Give recall something to work with on the very first shell.
         [[ -x "$DOTS_DIR/tools/backfill-index.sh" ]] \
             && as_user "$DOTS_DIR/tools/backfill-index.sh" >/dev/null 2>&1
+
+        # Publish the wallpaper for the lock screen and the greeter.
+        #
+        # It has to leave $HOME. The greeter runs as the `lightdm` user, which
+        # cannot read your home directory, so a background pointed anywhere
+        # under ~/ is silently never drawn. Copied rather than symlinked for the
+        # same reason: a link into a home it cannot traverse is no better.
+        #
+        # This is the dots phase and not the i3 phase because this is where the
+        # image exists -- same division as the owl, which dots renders and the
+        # kitty phase merely leaves room for. The i3 phase has already written
+        # both configs pointing at this path; if this phase skipped, they fall
+        # back to flat #282828 rather than breaking.
+        local wp="$DOTS_DIR/terminal/wallpaper.png"
+        if [[ -f "$wp" ]]; then
+            install -d -m 755 /usr/share/backgrounds/owlshells
+            if install -m 644 "$wp" /usr/share/backgrounds/owlshells/lock.png; then
+                msg "lock/login image published to /usr/share/backgrounds/owlshells/lock.png"
+            else
+                warn "could not publish the lock image -- greeter stays on flat colour"
+            fi
+        else
+            warn "no terminal/wallpaper.png in the checkout -- lock and greeter stay flat"
+        fi
         return 0
     }
 
