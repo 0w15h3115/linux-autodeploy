@@ -50,13 +50,6 @@ readonly ZSHRC_MARKER="# >>> kali-deploy-physical >>>"
 readonly ZSHRC_END_MARKER="# <<< kali-deploy-physical <<<"
 readonly MIN_DISK_GB=20
 
-# Where this script lives, so it can find assets/ shipped alongside it. Resolved
-# through readlink -f because the usual invocation is `sudo ./kali-deploy-physical`
-# from the checkout, but a symlink into ~/bin is just as reasonable and $0 would
-# then point at the link rather than the repo.
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-readonly SCRIPT_DIR
-
 # Tool metapackages. Kali curates these and resolves their dependencies, so the
 # names are stable across rolling in a way a hand-listed set of tools is not.
 # Each is probed with apt_available before install: one that Kali renames is a
@@ -222,7 +215,7 @@ DESKTOP_PKGS=(
     # likely other paths too. Listed here for the same reason brightnessctl and
     # feh are -- something we ship drives it directly, so it should be a declared
     # dependency rather than a lucky one, and its disappearance should be a
-    # resolution failure here instead of a missing wallpaper you notice later.
+    # resolution failure here instead of a bare terminal you notice weeks later.
     python3-pil
 )
 
@@ -632,45 +625,6 @@ if should_run desktop; then
         rm -rf "$NERD_TMP"
     fi
 
-    # --- Wallpaper.
-    #
-    # Shipped with the script rather than fetched: it is 66K, and the desktop
-    # phase already has one network dependency (the font) which is one more than
-    # it should have.
-    #
-    # ~/.fehbg is written directly instead of running `feh --bg-fill`, because
-    # feh needs a live X display to set a background and this phase usually runs
-    # from a TTY with no session at all. The file is just a shell script that
-    # calls feh, i3 executes it at session start (see the i3 phase), and feh
-    # rewrites it whenever you set a different background later -- so this is the
-    # same handoff, minus the requirement to be inside X when it happens.
-    #
-    # Only written when absent. It is the *default* wallpaper: a re-run must not
-    # argue with a background you chose yourself.
-    WALLPAPER_SRC="$SCRIPT_DIR/assets/wallpaper.png"
-    WALLPAPER_DST="/usr/local/share/backgrounds/kali-deploy-wallpaper.png"
-    FEHBG="$USER_HOME/.fehbg"
-
-    if [[ ! -f "$WALLPAPER_SRC" ]]; then
-        warn "assets/wallpaper.png not found beside the script -- skipping wallpaper"
-    elif [[ -e "$FEHBG" ]]; then
-        msg "wallpaper already set ($FEHBG exists -- leaving your choice alone)"
-    else
-        run mkdir -p "$(dirname "$WALLPAPER_DST")"
-        if run install -m 0644 "$WALLPAPER_SRC" "$WALLPAPER_DST"; then
-            write_file "$FEHBG" 755 <<FEHBG_SH
-#!/bin/sh
-# Written by kali-deploy-physical. i3 runs this at session start.
-# Change the background with:  feh --bg-fill /path/to/image
-# feh rewrites this file when you do, so there is nothing here to edit.
-feh --no-fehbg --bg-fill '$WALLPAPER_DST'
-FEHBG_SH
-            run chown "$REAL_USER:$REAL_USER" "$FEHBG"
-            msg "wallpaper installed to $WALLPAPER_DST (applied at next i3 start)"
-        else
-            warn "could not install the wallpaper (skipping)"
-        fi
-    fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -907,9 +861,14 @@ exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/autotiling.lock autotiling
 
 # Wallpaper. Indirect through ~/.fehbg, which feh rewrites every time it sets a
 # background -- so changing wallpaper later is just `feh --bg-fill <image>` with
-# no edit here and no reload. The desktop phase writes this file with the shipped
-# default when it does not already exist; the guard stays because --only i3 on a
-# box that never ran desktop would otherwise log a failed exec on every reload.
+# no edit here and no reload.
+#
+# This script owns the mechanism and not the image: dots' install.sh writes
+# ~/.fehbg during the dots phase, the same way it appends the owl to kitty.conf.
+# What the box looks like is that repo's job; what is installed on it is this
+# one's. The guard matters more for it: a box whose dots phase skipped for want
+# of credentials has no ~/.fehbg at all, and i3 must not log a failed exec on
+# every reload because of it.
 exec_always --no-startup-id [ -x $HOME/.fehbg ] && $HOME/.fehbg
 
 # Compositor. X11 has no notion of a translucent window by itself, so without
