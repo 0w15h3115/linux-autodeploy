@@ -945,15 +945,23 @@ if should_run polybar; then
 ; as one thing. The amber #F0C674 and grey #707880 that used to be here belonged
 ; to neither.
 ;
-; primary is the lavender the prompt gives its three glyphs -- the only
-; hue-distinct member of that palette, and so the one that can carry an accent.
-; secondary is the blue-grey the prompt uses for the path. alert is pinned to the
-; prompt's true red for the same reason it is pinned there: a muted red against a
-; palette this quiet whispers, and an alert is the last thing that should.
+; primary is a light cyan, sitting a couple of steps up in lightness from the
+; blue-grey the prompt uses for the path -- so the accent and the palette are
+; obviously the same family, read as a deliberate light/dark pair rather than the
+; near-miss that two colours of similar lightness a few degrees apart would be.
+; It was the prompt's lavender first, which is right in a prompt where it is the
+; only hue-distinct member, and reads pink stretched across a bar.
+;
+; 8.3:1 on the background, against 6.1:1 for that lavender -- an accent that
+; underlines a workspace and prefixes a module label has to survive being small.
+;
+; alert is pinned to the prompt's true red for the reason it is pinned there: a
+; muted red against a palette this quiet whispers, and an alert is the last thing
+; that should.
 background = #282828
 background-alt = #3A3D42
 foreground = #DADADA
-primary = #B2A1C0
+primary = #9FC9D4
 secondary = #88A9B5
 alert = #FF2D2D
 disabled = #8A8A8A
