@@ -149,10 +149,30 @@ DESKTOP_PKGS=(
     # split along its longer axis, so a tall window splits horizontally and you
     # get one wide pane beside a stack instead of endless columns.
     #
-    # Not a master/stack layout -- i3 has no such thing, and this is a spiral,
-    # so a fourth window splits the third rather than joining a stack. It solves
-    # the endless-columns problem, not the "be awesome-wm" problem.
+    # --limit 2 in the i3 config turns that into a real master/stack layout: it
+    # caps nesting at two levels, so window one holds the left half at full
+    # height and everything after it stacks down the right column. Measured at
+    # 1920x1200 with five windows that is 960x1200 beside four panes of 960x300,
+    # which is the geometry awesome's tile layout gives at nmaster=1, mwfact=0.5.
+    # Without the flag autotiling spirals inward instead, each new window halving
+    # the last. The one thing this cannot do is awesome's fair layout: that
+    # re-flows every window on the screen whenever the count changes, and i3's
+    # layout is a persistent tree that only changes where you touch it.
     autotiling
+
+    # All three already arrive inside kali-desktop-i3's dependency tree, but the
+    # i3 config below drives them directly -- brightnessctl for the XF86 keys, feh
+    # for the wallpaper, and wpctl (shipped by wireplumber) for volume. They are
+    # listed for the same reason polybar and kitty are: if one ever leaves the
+    # metapackage this should fail loudly here, not quietly deploy a config full
+    # of keybindings that do nothing.
+    #
+    # wireplumber is the one worth watching. kali-desktop-i3's *top-level*
+    # dependency is pulseaudio and wireplumber only appears deeper in the tree, so
+    # the config's use of wpctl over pactl is betting on pipewire winning the seat.
+    brightnessctl
+    feh
+    wireplumber
 )
 
 readonly ALL_PHASES=(base tools desktop harden i3 polybar kitty shell dots wordlists)
@@ -172,6 +192,7 @@ VERIFY_BINS_TOOLS=(
 )
 VERIFY_BINS_DESKTOP=(
     i3 polybar kitty dmenu_run i3lock xss-lock Xorg
+    brightnessctl wpctl feh autotiling
 )
 
 # Colors
@@ -637,6 +658,19 @@ set $mod Mod1
 
 font pango:monospace 8
 
+# Borders: 2px edge, no titlebar. Floating windows match, otherwise they keep
+# the default titlebar and look inconsistent with the tiled ones.
+default_border pixel 2
+default_floating_border pixel 2
+
+# Colors. i3's built-in client.focused is blue (#4C7899 border, #285577 title,
+# #2E9EF4 indicator); these are greys off the same dark palette as the i3lock
+# background below. The other client.* defaults are already neutral, so they
+# are left alone. The text field only shows in stacking/tabbed layouts, which
+# draw titlebars regardless of default_border.
+#                       border  bground text    indicator child_border
+client.focused          #5c5f66 #3a3d42 #dadada #7f838a   #5c5f66
+
 # Terminal
 bindsym $mod+Return exec kitty
 
@@ -743,9 +777,60 @@ bindsym $mod+r mode "resize"
 # Polybar
 exec_always --no-startup-id $HOME/.config/polybar/launch.sh
 
-# Split direction follows the focused window's shape, so a third window stacks
-# beside the second instead of becoming a third column. See DESKTOP_PKGS.
-exec_always --no-startup-id autotiling
+# Automatic split direction. i3 itself has no rule for this -- for_window matches
+# window properties and never a window count, and workspace_layout is a single
+# global default -- so it takes an IPC client. autotiling sets the split on the
+# focused window from its shape: taller than wide gets splitv, wider than tall
+# gets splith. On this 1920x1200 panel that means window two lands beside window
+# one, and window three lands *below* window two, since window two is 960x1200
+# by then. Resize a column past square and the direction flips, because the rule
+# is geometry and not ordinal position.
+#
+# --limit 2 is what makes it master/stack rather than a spiral: it caps nesting at
+# two levels, so window one keeps the left half at full height and every window
+# after it stacks down the right column instead of subdividing whichever window
+# was opened last. Measured at 1920x1200 with five windows, that is 960x1200 on
+# the left and four panes of 960x300 on the right -- the same geometry awesome's
+# tile layout produces at nmaster=1, mwfact=0.5.
+#
+# Drop the flag and you get autotiling's default inward spiral, where window four
+# halves window three, window five halves window four, and so on down.
+#
+# Note this line only fires at i3 startup and on restart ($mod+Shift+r), not on
+# reload ($mod+Shift+c) -- despite the common claim otherwise, exec_always is
+# documented and observed to re-run on restart alone. Editing this block and
+# pressing $mod+Shift+c will not pick it up.
+#
+# flock is the single-instance guard, since autotiling has none of its own: the
+# lock is held for the process lifetime, so a second copy exits immediately
+# instead of piling up behind a restart. pkill is the usual advice here and the
+# wrong tool -- every -f pattern that matches autotiling also matches the shell
+# i3 starts it from, so it kills its own replacement.
+exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/autotiling.lock autotiling --limit 2
+
+# Wallpaper. Indirect through ~/.fehbg, which feh rewrites every time it sets a
+# background -- so changing wallpaper later is just `feh --bg-fill <image>` with
+# no edit here and no reload. A freshly imaged box has never run feh, so the
+# file does not exist yet; the guard keeps i3 from logging a failed exec on
+# every reload until you set one.
+exec_always --no-startup-id [ -x $HOME/.fehbg ] && $HOME/.fehbg
+
+# Brightness. brightnessctl writes /sys/class/backlight/<dev>/brightness, which
+# udev makes group-writable by `video` -- the user is already in that group on a
+# normal install, so this needs no sudo and no setuid helper. -n keeps the floor
+# at 1: without it, holding the down key blacks the panel out completely and the
+# way back is a keypress you can no longer see to aim.
+bindsym XF86MonBrightnessUp   exec --no-startup-id brightnessctl -n set 5%+
+bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl -n set 5%-
+
+# Volume. wpctl is wireplumber's control tool: Kali runs pipewire, so pactl
+# would be talking to the pulse compatibility shim rather than the real server.
+# -l caps at 100% -- without it, repeated presses push the sink into software
+# amplification, which distorts rather than getting louder.
+bindsym XF86AudioRaiseVolume exec --no-startup-id wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+
+bindsym XF86AudioLowerVolume exec --no-startup-id wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%-
+bindsym XF86AudioMute        exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+bindsym XF86AudioMicMute     exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
 
 # Lock screen -- manual, and automatically after 5 min idle. On a conference
 # floor an unattended unlocked laptop is the whole threat model.
