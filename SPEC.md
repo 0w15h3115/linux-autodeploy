@@ -117,12 +117,19 @@ can install.
 
 ### A credential the box does not have is a skip, not a failure
 
-The `dots` phase pulls a **private** repo. A freshly imaged machine has no SSH
-key and no `gh` token, so the common case is that it cannot authenticate at all.
-It tries `DOTS_TOKEN`, then SSH, then `gh`, and when none work it warns, prints
-the one command that finishes the job later, and lets the run continue. The
+The `dots` phase pulls a repo that `DOTS_REPO` may point at a **private** fork
+of. A freshly imaged machine has no SSH key and no `gh` token, so the common
+case is that it cannot authenticate at all. It tries `DOTS_TOKEN`, then SSH,
+then `gh`, then a plain anonymous clone, and when none work it warns, prints the
+one command that finishes the job later, and lets the run continue. The
 governing requirement applies here as everywhere: nothing optional gets to be
 the reason an install is redone.
+
+The anonymous fallback is load-bearing, not a courtesy. The default `DOTS_REPO`
+is public, and while it was **not** tried, a stock box — the exact machine this
+phase exists to serve — skipped the phase on every deploy and came up with
+Kali's default shell, because "no credentials" was being read as "unreachable"
+for a repo that needed none.
 
 Two supporting rules fall out of it:
 

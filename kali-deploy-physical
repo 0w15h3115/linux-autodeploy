@@ -30,9 +30,10 @@
 #   -h, --help         this message
 #
 # Environment:
-#   DOTS_TOKEN         GitHub token for the private dots repo. Without it the
-#                      dots phase falls back to an SSH key, then to `gh auth`,
-#                      then skips (the rest of the run is unaffected).
+#   DOTS_TOKEN         GitHub token, only needed for a private fork. Without it
+#                      the dots phase falls back to an SSH key, then `gh auth`,
+#                      then a plain anonymous clone, then skips (the rest of
+#                      the run is unaffected).
 #   DOTS_REPO          owner/name of the shell kit (default owlshells/dots)
 #
 # Phases: base tools desktop harden i3 polybar kitty shell dots wordlists

@@ -102,20 +102,22 @@ sudo ufw allow 8000/tcp     # or the fw-open alias
 
 ### The `dots` phase
 
-Clones the private [`owlshells/dots`](https://github.com/owlshells/dots) shell kit
-into `~/dots` and runs its `install.sh`, which symlinks `~/.bash_aliases` and adds a
+Clones the [`owlshells/dots`](https://github.com/owlshells/dots) shell kit into
+`~/dots` and runs its `install.sh`, which symlinks `~/.bash_aliases` and adds a
 guarded hook to `~/.zshrc`. It then seeds the command-recall index from any logs
 already on the box, so the shell is useful on the first login rather than the tenth.
 
-Because the repo is private and a freshly imaged box has no credentials, the phase
-tries each transport it might plausibly have and **skips rather than fails** if none
-work — a shell kit is never a reason to redo an install:
+`dots` is public, so a freshly imaged box with no credentials at all still gets it.
+The authenticated transports are tried first anyway, because `DOTS_REPO` can point
+at a private fork; the phase **skips rather than fails** if every one is unreachable
+— a shell kit is never a reason to redo an install:
 
 | Order | Transport | Needs |
 |-------|-----------|-------|
 | 1 | `DOTS_TOKEN` | `sudo DOTS_TOKEN=<pat> ./kali-deploy-... ` |
 | 2 | SSH | a key already on the box, agent or on disk |
 | 3 | `gh` | `gh auth login`, *if* gh is present — it ships from GitHub's own apt repo, not Kali's, so a stock box will not have it |
+| 4 | anonymous HTTPS | nothing — the path a stock box actually takes |
 
 A token is passed as a per-invocation `http.extraHeader`, never embedded in the
 remote URL — a URL credential gets persisted into `.git/config` and echoed back in

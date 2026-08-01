@@ -204,12 +204,23 @@ t_idempotent_shell() {
 }
 
 # T10 -- the dots phase. The container has no GitHub credentials, which is
-# exactly the state of a freshly imaged box, so the degraded path is the one
-# that gets exercised here -- and it is the one that matters. A private repo the
-# box cannot reach must never be the reason a reimage has to be redone.
+# exactly the state of a freshly imaged box, so the credential-less path is the
+# one that gets exercised here -- and it is the one that matters.
+#
+# What "correct" means here depends on whether github.com is reachable, so the
+# suite probes once and asserts the matching outcome rather than accepting
+# either. The default DOTS_REPO is public: with a network, no credentials must
+# still produce a real checkout via the anonymous clone. This assertion used to
+# read the other way -- it required ~/dots to be ABSENT after a credential-less
+# run, which was right while the repo was private and silently locked in the
+# bug that made a stock box skip the phase on every deploy. Without a network,
+# the requirement falls back to the original one: warn, name the command that
+# finishes the job, change nothing.
 t_dots_phase() {
     head_ "T10: dots phase degrades instead of failing"
     local marker="$1"
+    local online=0
+    GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/owlshells/dots.git &>/dev/null && online=1
 
     "$SCRIPT" --list-phases 2>/dev/null | grep -qw dots \
         && pass "dots is a registered phase" \
@@ -223,16 +234,28 @@ t_dots_phase() {
         tail -15 /tmp/dots.log | sed 's/^/    /'
     fi
 
-    [[ ! -e "$USER_HOME/dots" ]] \
-        && pass "no half-made checkout left behind on failure" \
-        || fail "$USER_HOME/dots exists after a credential-less run"
-
-    # Every exit from this phase must name the command that completes it later.
-    if grep -q 'only dots' /tmp/dots.log; then
-        pass "tells you how to finish it later"
+    if (( online )); then
+        [[ -d "$USER_HOME/dots/.git" ]] \
+            && pass "anonymous clone lands a real checkout with no credentials" \
+            || { fail "no ~/dots after a credential-less run against a public repo"
+                 tail -15 /tmp/dots.log | sed 's/^/    /'; }
+        grep -q 'over public' /tmp/dots.log \
+            && pass "reports the anonymous transport it used" \
+            || fail "did not name the anonymous transport"
+        rm -rf "$USER_HOME/dots"
     else
-        fail "gave no recovery instructions"
-        sed 's/^/    /' /tmp/dots.log | tail -10
+        echo "    (github.com unreachable -- asserting the offline skip instead)"
+        [[ ! -e "$USER_HOME/dots" ]] \
+            && pass "no half-made checkout left behind on failure" \
+            || fail "$USER_HOME/dots exists after an unreachable run"
+
+        # Every exit from this phase must name the command that completes it later.
+        if grep -q 'only dots' /tmp/dots.log; then
+            pass "tells you how to finish it later"
+        else
+            fail "gave no recovery instructions"
+            sed 's/^/    /' /tmp/dots.log | tail -10
+        fi
     fi
 
     # A token must never reach the transcript: this script's output is teed to
