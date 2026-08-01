@@ -871,15 +871,19 @@ exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/autotiling.lock autotiling
 # every reload because of it.
 exec_always --no-startup-id [ -x $HOME/.fehbg ] && $HOME/.fehbg
 
-# Compositor. X11 has no notion of a translucent window by itself, so without
-# this kitty's background_opacity does nothing and the terminal comes up solid --
-# the wallpaper behind it is simply not composited in. picom arrives inside
-# kali-desktop-i3's tree but nothing starts it, which is why this line exists.
+# Compositor. picom arrives inside kali-desktop-i3's tree but nothing starts
+# it, which is why this line exists.
+#
+# --backend glx is required explicitly: picom 13 dropped its implicit backend
+# fallback, and Kali's /etc/xdg/picom.conf doesn't set one either, so a bare
+# `picom` now hard-fails with "Backend not specified" instead of composing.
+# glx is what Intel iGPUs (i915, AIGLX/DRI2) support; drop to --backend
+# xrender by hand if a box turns out to have no usable GLX.
 #
 # Foreground under flock, not `picom -b`: -b daemonises, the parent exits, and
 # flock releases the lock the moment it does -- which would leave the guard
 # guarding nothing. Same single-instance reasoning as autotiling above.
-exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/picom.lock picom
+exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/picom.lock picom --backend glx
 
 # Brightness. brightnessctl writes /sys/class/backlight/<dev>/brightness, which
 # udev makes group-writable by `video` -- the user is already in that group on a
@@ -1083,43 +1087,10 @@ font_size        11.0
 shell            /usr/bin/zsh
 shell_integration enabled
 enable_audio_bell no
-# 0.9, not the 0.25 that matches Windows Terminal on the WSL box. The scales do
-# agree -- both are "how opaque is the background" -- but the wallpaper does not.
-# The WSL background is a photograph; this one is 98% pure black with a white
-# wordmark across the middle, and the two numbers behave completely differently
-# behind it.
-#
-# Composited against #282828, per pixel of wallpaper:
-#
-#   opacity   over the black 98%   text   dim     over the wordmark   text   dim
-#     0.9         #242424         11.1   4.5           #3d3d3d         7.8   3.1
-#     0.75        #1e1e1e         11.9   4.8           #5e5e5e         4.6   1.9
-#     0.25        #0a0a0a         14.2   5.7           #c9c9c9         1.2   2.1
-#
-# 0.25 is unusable here: text lands at 1.2:1 where the wordmark shows through,
-# which is invisible, and over the other 98% it is just black -- transparency
-# that costs contrast and shows nothing. 0.75 reads better but drops the prompt's
-# quiet greys to 1.9:1 in that band, under the 3:1 floor shell/zsh/prompt.zsh
-# pins VINNY_DIM at 245 to hold. 0.9 keeps every element above its floor and
-# still lets the logo ghost through, which is the whole idea.
-#
-# The band is not hypothetical: the wordmark runs across the vertical centre, and
-# a master/stack left pane is full height, so it crosses it every time.
-#
-# Raise it to 1.0 if you swap in a busier wallpaper and want the terminal solid,
-# or drop it if you swap in a photograph -- the numbers above are specific to a
-# near-black background.
-#
-# This does nothing at all without a compositor -- X11 has no idea what a
-# translucent window is on its own, and an uncomposited kitty just draws the
-# background colour. picom is exec'd from the i3 config for exactly this, and is
-# named in DESKTOP_PKGS so its absence is an install failure rather than a
-# terminal that silently comes up solid.
-#
-# The owl rides on top of this: dots appends background_image + background_tint
-# below, and at 0.25 the image is translucent along with everything else, which
-# is what leaves it faint over the wallpaper rather than sitting on a slab.
-background_opacity 0.9
+# Fully opaque -- no window transparency, so this needs no compositor to render
+# correctly. The owl (background_image + background_tint below) is drawn by
+# kitty itself onto its own opaque background and is unaffected by this value.
+background_opacity 1.0
 # #282828, not #1e1e1e. dots' prompt palette is tuned against this exact value --
 # shell/zsh/prompt.zsh pins VINNY_DIM at 245 rather than 242 because 242 fell to
 # 2.81:1 against it, under the 3:1 floor. Same background in polybar and in
@@ -1316,15 +1287,18 @@ if should_run dots; then
             GIT_SSH_COMMAND="$DOTS_SSH_OPTS" "$@"
     }
 
-    # The repo is private, and a freshly imaged box has neither an SSH key nor a
-    # gh token. Try each transport it might plausibly have, most deliberate
-    # first, and treat "none" as a skip: a missing shell kit is an
-    # inconvenience, not a reason to redo an install.
+    # DOTS_REPO defaults to a public repo, but a freshly imaged box may still
+    # need to reach a private fork, so try authenticated transports first --
+    # most deliberate first -- and fall back to a plain anonymous clone, which
+    # is all a public repo ever needed. Treat total failure as a skip: a
+    # missing shell kit is an inconvenience, not a reason to redo an install.
     dots_transport() {
         [[ -n "${DOTS_TOKEN:-}" ]] && { echo token; return 0; }
         as_user git ls-remote "git@github.com:${DOTS_SLUG}.git" &>/dev/null \
             && { echo ssh; return 0; }
         as_user gh auth token &>/dev/null && { echo gh; return 0; }
+        as_user git ls-remote "https://github.com/${DOTS_SLUG}.git" &>/dev/null \
+            && { echo public; return 0; }
         return 1
     }
 
@@ -1344,6 +1318,9 @@ if should_run dots; then
                 hdr=$(printf 'x-access-token:%s' "$tok" | base64 -w0)
                 as_user git -c "http.extraHeader=Authorization: Basic $hdr" \
                     clone --quiet "https://github.com/${DOTS_SLUG}.git" "$DOTS_DIR"
+                ;;
+            public)
+                as_user git clone --quiet "https://github.com/${DOTS_SLUG}.git" "$DOTS_DIR"
                 ;;
         esac
     }
@@ -1384,8 +1361,9 @@ if should_run dots; then
     else
         DOTS_TR=$(dots_transport) || DOTS_TR=""
         if [[ -z "$DOTS_TR" ]]; then
-            warn "no usable credentials for the private repo ${DOTS_SLUG} -- skipping"
-            warn "  the rest of this run is unaffected. Finish it later with:"
+            warn "could not reach ${DOTS_SLUG} (tried token/ssh/gh auth, and an"
+            warn "  anonymous clone) -- skipping. If it's a private fork, finish"
+            warn "  it later with:"
             warn "    sudo DOTS_TOKEN=<token> $0 --only dots"
             warn "  (or restore an SSH key, or install gh and \`gh auth login\` --"
             warn "   gh ships from GitHub's apt repo, not Kali's, so it is not here)"
