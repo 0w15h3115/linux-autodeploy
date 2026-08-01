@@ -50,6 +50,13 @@ readonly ZSHRC_MARKER="# >>> kali-deploy-physical >>>"
 readonly ZSHRC_END_MARKER="# <<< kali-deploy-physical <<<"
 readonly MIN_DISK_GB=20
 
+# Where this script lives, so it can find assets/ shipped alongside it. Resolved
+# through readlink -f because the usual invocation is `sudo ./kali-deploy-physical`
+# from the checkout, but a symlink into ~/bin is just as reasonable and $0 would
+# then point at the link rather than the repo.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+readonly SCRIPT_DIR
+
 # Tool metapackages. Kali curates these and resolves their dependencies, so the
 # names are stable across rolling in a way a hand-listed set of tools is not.
 # Each is probed with apt_available before install: one that Kali renames is a
@@ -96,6 +103,14 @@ EXTRA_PKGS=(
     seclists
     wordlists
     ufw
+
+    # The shell this whole script is written around. It was never listed, on the
+    # assumption that Kali always ships it and makes it the default -- true of the
+    # stock ISO, not true of every install path. When that assumption is wrong the
+    # deploy still writes ~/.zshrc and still points kitty at /usr/bin/zsh, and you
+    # get a bash login with none of it: no prompt, no recall, no lfcd. The remote
+    # script has always listed it; this one now agrees.
+    zsh
 
     # Command library / cheat-sheets. Replaces the hand-maintained snippets
     # that used to live in the dots repo: same {{placeholder}} grammar, 200+
@@ -616,6 +631,46 @@ if should_run desktop; then
         fi
         rm -rf "$NERD_TMP"
     fi
+
+    # --- Wallpaper.
+    #
+    # Shipped with the script rather than fetched: it is 66K, and the desktop
+    # phase already has one network dependency (the font) which is one more than
+    # it should have.
+    #
+    # ~/.fehbg is written directly instead of running `feh --bg-fill`, because
+    # feh needs a live X display to set a background and this phase usually runs
+    # from a TTY with no session at all. The file is just a shell script that
+    # calls feh, i3 executes it at session start (see the i3 phase), and feh
+    # rewrites it whenever you set a different background later -- so this is the
+    # same handoff, minus the requirement to be inside X when it happens.
+    #
+    # Only written when absent. It is the *default* wallpaper: a re-run must not
+    # argue with a background you chose yourself.
+    WALLPAPER_SRC="$SCRIPT_DIR/assets/wallpaper.png"
+    WALLPAPER_DST="/usr/local/share/backgrounds/kali-deploy-wallpaper.png"
+    FEHBG="$USER_HOME/.fehbg"
+
+    if [[ ! -f "$WALLPAPER_SRC" ]]; then
+        warn "assets/wallpaper.png not found beside the script -- skipping wallpaper"
+    elif [[ -e "$FEHBG" ]]; then
+        msg "wallpaper already set ($FEHBG exists -- leaving your choice alone)"
+    else
+        run mkdir -p "$(dirname "$WALLPAPER_DST")"
+        if run install -m 0644 "$WALLPAPER_SRC" "$WALLPAPER_DST"; then
+            write_file "$FEHBG" 755 <<FEHBG_SH
+#!/bin/sh
+# Written by kali-deploy-physical. i3 runs this at session start.
+# Change the background with:  feh --bg-fill /path/to/image
+# feh rewrites this file when you do, so there is nothing here to edit.
+feh --no-fehbg --bg-fill '$WALLPAPER_DST'
+FEHBG_SH
+            run chown "$REAL_USER:$REAL_USER" "$FEHBG"
+            msg "wallpaper installed to $WALLPAPER_DST (applied at next i3 start)"
+        else
+            warn "could not install the wallpaper (skipping)"
+        fi
+    fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -852,9 +907,9 @@ exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/autotiling.lock autotiling
 
 # Wallpaper. Indirect through ~/.fehbg, which feh rewrites every time it sets a
 # background -- so changing wallpaper later is just `feh --bg-fill <image>` with
-# no edit here and no reload. A freshly imaged box has never run feh, so the
-# file does not exist yet; the guard keeps i3 from logging a failed exec on
-# every reload until you set one.
+# no edit here and no reload. The desktop phase writes this file with the shipped
+# default when it does not already exist; the guard stays because --only i3 on a
+# box that never ran desktop would otherwise log a failed exec on every reload.
 exec_always --no-startup-id [ -x $HOME/.fehbg ] && $HOME/.fehbg
 
 # Compositor. X11 has no notion of a translucent window by itself, so without
@@ -886,8 +941,8 @@ bindsym XF86AudioMicMute     exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_
 
 # Lock screen -- manual, and automatically after 5 min idle. On a conference
 # floor an unattended unlocked laptop is the whole threat model.
-bindsym $mod+Escape exec i3lock -c 282a2e
-exec --no-startup-id xss-lock --transfer-sleep-lock -- i3lock -c 282a2e --nofork
+bindsym $mod+Escape exec i3lock -c 282828
+exec --no-startup-id xss-lock --transfer-sleep-lock -- i3lock -c 282828 --nofork
 exec --no-startup-id xset s 300 300
 I3CONFIG
 
@@ -910,13 +965,23 @@ if should_run polybar; then
     # polybar log with font errors.
     write_file "$POLYBAR_DIR/config.ini" <<'POLYBAR'
 [colors]
-background = #282A2E
-background-alt = #373B41
-foreground = #C5C8C6
-primary = #F0C674
-secondary = #8ABEB7
-alert = #A54242
-disabled = #707880
+; Taken from the dots prompt palette (shell/zsh/prompt.zsh) rather than from
+; polybar's Tomorrow-Night default, so the bar, the terminal and the prompt read
+; as one thing. The amber #F0C674 and grey #707880 that used to be here belonged
+; to neither.
+;
+; primary is the lavender the prompt gives its three glyphs -- the only
+; hue-distinct member of that palette, and so the one that can carry an accent.
+; secondary is the blue-grey the prompt uses for the path. alert is pinned to the
+; prompt's true red for the same reason it is pinned there: a muted red against a
+; palette this quiet whispers, and an alert is the last thing that should.
+background = #282828
+background-alt = #3A3D42
+foreground = #DADADA
+primary = #B2A1C0
+secondary = #88A9B5
+alert = #FF2D2D
+disabled = #8A8A8A
 
 [bar/main]
 width = 100%
@@ -1073,7 +1138,11 @@ enable_audio_bell no
 # below, and at 0.25 the image is translucent along with everything else, which
 # is what leaves it faint over the wallpaper rather than sitting on a slab.
 background_opacity 0.25
-background       #1e1e1e
+# #282828, not #1e1e1e. dots' prompt palette is tuned against this exact value --
+# shell/zsh/prompt.zsh pins VINNY_DIM at 245 rather than 242 because 242 fell to
+# 2.81:1 against it, under the 3:1 floor. Same background in polybar and in
+# i3lock, so the whole desktop is one colour rather than three near-misses.
+background       #282828
 scrollback_lines 10000
 open_url_with    default
 detect_urls      yes
@@ -1216,6 +1285,32 @@ $ZSHRC_END_MARKER
 ZSHRC_BLOCK
         chown "$REAL_USER:$REAL_USER" "$ZSHRC"
         msg "appended config block to $ZSHRC"
+    fi
+
+    # Make zsh the login shell if it is not already. Writing a ~/.zshrc for a
+    # user whose shell is bash produces a box that looks untouched: the block is
+    # on disk and nothing ever sources it. kitty is pointed at /usr/bin/zsh so a
+    # terminal window is fine either way, but a TTY, an SSH session and anything
+    # spawning $SHELL are not -- and a tty is exactly where you end up when the
+    # desktop is what broke.
+    #
+    # Guarded rather than unconditional: chsh on a box that is already zsh is
+    # noise, and a box deliberately set to something else should stay that way
+    # once, not be re-argued on every run.
+    CURRENT_SHELL=$(getent passwd "$REAL_USER" | cut -d: -f7)
+    ZSH_PATH=$(command -v zsh 2>/dev/null)
+    if [[ -z "$ZSH_PATH" ]]; then
+        warn "zsh is not installed -- the block above will never be sourced"
+        warn "  install it and re-run: sudo $0 --only shell"
+    elif [[ "$CURRENT_SHELL" == "$ZSH_PATH" ]]; then
+        msg "login shell is already $ZSH_PATH"
+    elif (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} chsh -s $ZSH_PATH $REAL_USER (currently $CURRENT_SHELL)"
+    elif chsh -s "$ZSH_PATH" "$REAL_USER" 2>/dev/null; then
+        msg "login shell changed from $CURRENT_SHELL to $ZSH_PATH (takes effect next login)"
+    else
+        warn "could not change login shell from $CURRENT_SHELL to $ZSH_PATH"
+        warn "  do it by hand: chsh -s $ZSH_PATH $REAL_USER"
     fi
 fi
 
