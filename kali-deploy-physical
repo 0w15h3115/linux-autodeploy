@@ -181,12 +181,13 @@ DESKTOP_PKGS=(
     # layout is a persistent tree that only changes where you touch it.
     autotiling
 
-    # All three already arrive inside kali-desktop-i3's dependency tree, but the
+    # All four already arrive inside kali-desktop-i3's dependency tree, but the
     # i3 config below drives them directly -- brightnessctl for the XF86 keys, feh
-    # for the wallpaper, and wpctl (shipped by wireplumber) for volume. They are
+    # for the wallpaper, wpctl (shipped by wireplumber) for volume, and picom to
+    # composite, without which kitty's background_opacity is inert. They are
     # listed for the same reason polybar and kitty are: if one ever leaves the
     # metapackage this should fail loudly here, not quietly deploy a config full
-    # of keybindings that do nothing.
+    # of keybindings that do nothing and a terminal that comes up solid.
     #
     # wireplumber is the one worth watching. kali-desktop-i3's *top-level*
     # dependency is pulseaudio and wireplumber only appears deeper in the tree, so
@@ -194,6 +195,7 @@ DESKTOP_PKGS=(
     brightnessctl
     feh
     wireplumber
+    picom
 
     # Pillow, for the owl behind the terminal. dots' install.sh renders it from a
     # tracked mask with terminal/mkowl.py, whose only dependency this is, and
@@ -686,9 +688,15 @@ if should_run i3; then
 
     write_file "$I3_DIR/config" <<'I3CONFIG'
 # i3 config -- kali-deploy-physical
-# Mod is Alt (Mod1), not Super. Deliberate, carried over from the Ubuntu recipe.
+# Mod is Super/Windows (Mod4). This box is bare metal, so nothing upstream
+# swallows the Super key the way a hypervisor or a remote desktop client does --
+# and leaving Alt free means i3 never shadows an application's own Alt+<key>.
+#
+# It was Mod1 until now, carried over from the Ubuntu recipe (and briefly back to
+# Mod1 by PR #1). Changed deliberately: on hardware you sit at, Super is the key
+# with no other owner.
 
-set $mod Mod1
+set $mod Mod4
 
 font pango:monospace 8
 
@@ -848,6 +856,16 @@ exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/autotiling.lock autotiling
 # file does not exist yet; the guard keeps i3 from logging a failed exec on
 # every reload until you set one.
 exec_always --no-startup-id [ -x $HOME/.fehbg ] && $HOME/.fehbg
+
+# Compositor. X11 has no notion of a translucent window by itself, so without
+# this kitty's background_opacity does nothing and the terminal comes up solid --
+# the wallpaper behind it is simply not composited in. picom arrives inside
+# kali-desktop-i3's tree but nothing starts it, which is why this line exists.
+#
+# Foreground under flock, not `picom -b`: -b daemonises, the parent exits, and
+# flock releases the lock the moment it does -- which would leave the guard
+# guarding nothing. Same single-instance reasoning as autotiling above.
+exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/picom.lock picom
 
 # Brightness. brightnessctl writes /sys/class/backlight/<dev>/brightness, which
 # udev makes group-writable by `video` -- the user is already in that group on a
@@ -1041,7 +1059,20 @@ font_size        11.0
 shell            /usr/bin/zsh
 shell_integration enabled
 enable_audio_bell no
-background_opacity 0.95
+# 0.25 = the wallpaper reads clearly through the terminal, matching what Windows
+# Terminal calls 25% opacity on the WSL box. The scales agree: both are "how
+# opaque is the background", 1.0/100 being solid, so WT's 25 is kitty's 0.25.
+#
+# This does nothing at all without a compositor -- X11 has no idea what a
+# translucent window is on its own, and an uncomposited kitty just draws the
+# background colour. picom is exec'd from the i3 config for exactly this, and is
+# named in DESKTOP_PKGS so its absence is an install failure rather than a
+# terminal that silently comes up solid.
+#
+# The owl rides on top of this: dots appends background_image + background_tint
+# below, and at 0.25 the image is translucent along with everything else, which
+# is what leaves it faint over the wallpaper rather than sitting on a slab.
+background_opacity 0.25
 background       #1e1e1e
 scrollback_lines 10000
 open_url_with    default
@@ -1387,13 +1418,18 @@ cat <<BANNER
     2. Confirm polybar appears at the top and the battery module shows a
        percentage (it is pinned to BAT0 -- check 'ls /sys/class/power_supply'
        if it stays blank).
-    3. Mod is Alt. Mod+Return = kitty, Mod+d = dmenu, Mod+Escape = lock.
-       Watch for Alt collisions with app shortcuts.
-    4. Screen auto-locks after 5 minutes idle (xss-lock).
-    5. MAC randomization is on. If a captive portal or a MAC-allowlisted
+    3. Mod is the Windows/Super key. Mod+Return = kitty, Mod+d = dmenu,
+       Mod+Escape = lock. If Super does nothing, check the keyboard has one
+       and that no other grabber (a VM client, a KVM switch) is eating it.
+    4. kitty should be see-through, with the wallpaper reading behind it.
+       If it is solid, picom did not start: run 'picom' by hand and read the
+       error (a driver without a usable GLX backend is the usual one --
+       'picom --backend xrender' is the fallback).
+    5. Screen auto-locks after 5 minutes idle (xss-lock).
+    6. MAC randomization is on. If a captive portal or a MAC-allowlisted
        network refuses you, that is why:
            sudo rm /etc/NetworkManager/conf.d/00-macrandomize.conf
-    6. Check monitor mode on your wireless adapter before you rely on it:
+    7. Check monitor mode on your wireless adapter before you rely on it:
            sudo airmon-ng start wlan0
 
   Inbound is default-deny. To expose a listener (Responder, mitm6, a

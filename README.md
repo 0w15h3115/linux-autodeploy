@@ -151,7 +151,8 @@ end rather than claiming they passed:
 1. **Pick the i3 session at the LightDM greeter.** Kali defaults to Xfce; i3 is not
    automatic.
 2. Confirm polybar renders and the battery module finds `BAT0`.
-3. Mod is **Alt**. `Mod+Return` kitty, `Mod+d` dmenu, `Mod+Escape` lock.
+3. Mod is the **Windows/Super** key. `Mod+Return` kitty, `Mod+d` dmenu,
+   `Mod+Escape` lock.
 4. If a captive portal or MAC-allowlisted network rejects you, MAC randomization is
    why — `sudo rm /etc/NetworkManager/conf.d/00-macrandomize.conf`.
 5. Verify monitor mode before relying on it: `sudo airmon-ng start wlan0`.
