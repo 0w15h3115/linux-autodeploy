@@ -945,15 +945,22 @@ if should_run polybar; then
 ; as one thing. The amber #F0C674 and grey #707880 that used to be here belonged
 ; to neither.
 ;
-; primary is a light cyan, sitting a couple of steps up in lightness from the
-; blue-grey the prompt uses for the path -- so the accent and the palette are
-; obviously the same family, read as a deliberate light/dark pair rather than the
-; near-miss that two colours of similar lightness a few degrees apart would be.
-; It was the prompt's lavender first, which is right in a prompt where it is the
-; only hue-distinct member, and reads pink stretched across a bar.
+; primary is the seafoam the prompt gives a clean branch -- VINNY_BRANCH, taken
+; as-is rather than lightened, so the bar's accent is a colour that already
+; exists on screen instead of a near-match to one. It was the prompt's lavender
+; first, which is right in a prompt where it is the only hue-distinct member and
+; reads pink stretched across a bar; i3 has since taken that lavender for
+; client.urgent, where being the odd one out is the job.
 ;
-; 8.3:1 on the background, against 6.1:1 for that lavender -- an accent that
-; underlines a workspace and prefixes a module label has to survive being small.
+; secondary is the dim grey rather than the path's blue-grey. Those two are
+; near-twins about ten degrees apart -- fine in the prompt, where the branch
+; glyph always falls between them, but the focused and visible workspace
+; underlines sit directly adjacent, which is the one arrangement prompt.zsh says
+; they must never be in. Dropping secondary to grey leaves seafoam as the only
+; accent on the bar: the focused workspace is coloured, everything else is quiet.
+; It does mean secondary and disabled now carry the same value -- "not focused"
+; and "not present" look alike, which is correct here; both are things the eye
+; should skip.
 ;
 ; alert is pinned to the prompt's true red for the reason it is pinned there: a
 ; muted red against a palette this quiet whispers, and an alert is the last thing
@@ -961,8 +968,8 @@ if should_run polybar; then
 background = #282828
 background-alt = #3A3D42
 foreground = #DADADA
-primary = #9FC9D4
-secondary = #88A9B5
+primary = #83A0A4
+secondary = #8A8A8A
 alert = #FF2D2D
 disabled = #8A8A8A
 
