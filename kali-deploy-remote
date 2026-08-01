@@ -119,6 +119,16 @@ PKGS=(
     # that used to live in the dots repo: same {{placeholder}} grammar, 200+
     # sheets, and Kali maintains it so updates arrive via apt.
     arsenal-ng
+
+    # Terminal file manager, for the loot/output tree an engagement leaves
+    # behind -- a single static Go binary with no runtime dependencies, which
+    # is why it belongs on a box you only ever see through a tmux pane. Its one
+    # Recommends is ueberzug (in-terminal image previews); that is dead weight
+    # here with no display, but it is ~270K of Python and pulling it is
+    # cheaper than teaching apt_install a --no-install-recommends path for one
+    # package. The shell phase adds the `lfcd` wrapper that makes quitting lf
+    # leave you in the directory you ended up in.
+    lf
 )
 
 readonly ALL_PHASES=(base tools tailscale ssh firewall tmux shell dots wordlists)
@@ -713,6 +723,17 @@ alias ta='tmux attach -t'             # ta main
 alias tn='tmux new -s'                # tn main
 alias tl='tmux ls'
 alias tk='tmux kill-session -t'       # tk main
+
+# Files. A child process cannot change its parent's directory, so lf prints
+# where it ended up and the wrapper does the cd -- without this you always land
+# back where you started, which is the one thing you notice missing. Named
+# lfcd rather than aliased over lf so plain \`lf\` stays the real binary.
+# Defined unconditionally: it costs nothing on a box where the tools phase
+# didn't run, and misfires as a plain "command not found".
+lfcd() {
+    local dir
+    dir=\$(command lf -print-last-dir "\$@") && [[ -d "\$dir" ]] && cd "\$dir"
+}
 
 # Everything in this block duplicates something the dots shell kit provides, so
 # define it only when dots is absent. The box ends up fully equipped either way,

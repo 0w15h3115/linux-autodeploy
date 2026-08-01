@@ -158,10 +158,11 @@ end rather than claiming they passed:
 ### Shell
 
 Kali's own zsh config is left intact; the script appends a marker-guarded block with
-PATH, wordlist variables, and aliases. Oh My Zsh is deliberately *not* installed —
-Kali already ships syntax highlighting and autosuggestions, and OMZ only adds startup
-cost. To remove, delete the block between the `kali-deploy-physical` markers in
-`~/.zshrc`.
+PATH, wordlist variables, aliases, and `lfcd` — a wrapper around the `lf` file manager
+that leaves you in whatever directory you quit from. Oh My Zsh is deliberately *not*
+installed — Kali already ships syntax highlighting and autosuggestions, and OMZ only
+adds startup cost. To remove, delete the block between the `kali-deploy-physical`
+markers in `~/.zshrc`.
 
 ---
 
@@ -188,10 +189,11 @@ It will not disable password auth or enable the firewall unless it can prove you
 another way in (an installed key, or Tailscale already up) — a box that can't reach
 itself is worse than one with password auth on.
 
-Like the physical script it keeps Kali's own zsh and appends a marker-guarded block;
-Oh My Zsh and the `agnoster` theme are deliberately *not* installed. Agnoster needs
-powerline glyphs in the terminal you're connecting *from*, so over SSH from anything
-unconfigured it renders as boxes.
+Like the physical script it keeps Kali's own zsh and appends a marker-guarded block —
+including `lfcd`, the `lf` file-manager wrapper that leaves you in whatever directory
+you quit from. Oh My Zsh and the `agnoster` theme are deliberately *not* installed.
+Agnoster needs powerline glyphs in the terminal you're connecting *from*, so over SSH
+from anything unconfigured it renders as boxes.
 
 Your shell auto-attaches to a `main` tmux session on interactive SSH login, so a
 dropped connection never kills your work. For a plain shell — the day tmux itself is
