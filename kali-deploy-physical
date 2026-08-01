@@ -8,6 +8,11 @@
 #     the display manager) plus polybar and kitty
 #   - the v5 i3 / polybar / kitty configs
 #
+# Caveat: the i3 config execs picom with --backend glx hardcoded (picom 13
+# has no implicit backend fallback). That's correct for Intel iGPUs
+# (i915/AIGLX) but not probed -- a box with no usable GLX needs the picom
+# line in the i3 phase changed to --backend xrender by hand.
+#
 # Hardening (laptop on a hostile LAN -- see Phase 4):
 #   ufw default-deny inbound, no SSH server, no mDNS/CUPS/Bluetooth
 #   advertisement, NetworkManager MAC randomization, idle screen lock.
