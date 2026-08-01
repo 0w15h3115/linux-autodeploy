@@ -1033,8 +1033,11 @@ alias fw-status='sudo ufw status verbose'
 # where it ended up and the wrapper does the cd -- without this you always land
 # back where you started, which is the one thing you notice missing. Named
 # lfcd rather than aliased over lf so plain \`lf\` stays the real binary.
-# Defined unconditionally: it costs nothing on a box where the tools phase
-# didn't run, and misfires as a plain "command not found".
+# Outside the dots guard below on purpose. That guard is for things dots does
+# better, and it is allowed to be absent -- but THIS script installs lf, so its
+# one usability wrapper must not hinge on a private repo whose phase is designed
+# to skip. dots defines no lf integration to collide with, and even if it grows
+# one, two identical functions are harmless where \`alias serve\` would not be.
 lfcd() {
     local dir
     dir=\$(command lf -print-last-dir "\$@") && [[ -d "\$dir" ]] && cd "\$dir"
