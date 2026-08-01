@@ -1124,9 +1124,32 @@ font_size        11.0
 shell            /usr/bin/zsh
 shell_integration enabled
 enable_audio_bell no
-# 0.25 = the wallpaper reads clearly through the terminal, matching what Windows
-# Terminal calls 25% opacity on the WSL box. The scales agree: both are "how
-# opaque is the background", 1.0/100 being solid, so WT's 25 is kitty's 0.25.
+# 0.9, not the 0.25 that matches Windows Terminal on the WSL box. The scales do
+# agree -- both are "how opaque is the background" -- but the wallpaper does not.
+# The WSL background is a photograph; this one is 98% pure black with a white
+# wordmark across the middle, and the two numbers behave completely differently
+# behind it.
+#
+# Composited against #282828, per pixel of wallpaper:
+#
+#   opacity   over the black 98%   text   dim     over the wordmark   text   dim
+#     0.9         #242424         11.1   4.5           #3d3d3d         7.8   3.1
+#     0.75        #1e1e1e         11.9   4.8           #5e5e5e         4.6   1.9
+#     0.25        #0a0a0a         14.2   5.7           #c9c9c9         1.2   2.1
+#
+# 0.25 is unusable here: text lands at 1.2:1 where the wordmark shows through,
+# which is invisible, and over the other 98% it is just black -- transparency
+# that costs contrast and shows nothing. 0.75 reads better but drops the prompt's
+# quiet greys to 1.9:1 in that band, under the 3:1 floor shell/zsh/prompt.zsh
+# pins VINNY_DIM at 245 to hold. 0.9 keeps every element above its floor and
+# still lets the logo ghost through, which is the whole idea.
+#
+# The band is not hypothetical: the wordmark runs across the vertical centre, and
+# a master/stack left pane is full height, so it crosses it every time.
+#
+# Raise it to 1.0 if you swap in a busier wallpaper and want the terminal solid,
+# or drop it if you swap in a photograph -- the numbers above are specific to a
+# near-black background.
 #
 # This does nothing at all without a compositor -- X11 has no idea what a
 # translucent window is on its own, and an uncomposited kitty just draws the
@@ -1137,7 +1160,7 @@ enable_audio_bell no
 # The owl rides on top of this: dots appends background_image + background_tint
 # below, and at 0.25 the image is translucent along with everything else, which
 # is what leaves it faint over the wallpaper rather than sitting on a slab.
-background_opacity 0.25
+background_opacity 0.9
 # #282828, not #1e1e1e. dots' prompt palette is tuned against this exact value --
 # shell/zsh/prompt.zsh pins VINNY_DIM at 245 rather than 242 because 242 fell to
 # 2.81:1 against it, under the 3:1 floor. Same background in polybar and in
@@ -1516,10 +1539,14 @@ cat <<BANNER
     3. Mod is the Windows/Super key. Mod+Return = kitty, Mod+d = dmenu,
        Mod+Escape = lock. If Super does nothing, check the keyboard has one
        and that no other grabber (a VM client, a KVM switch) is eating it.
-    4. kitty should be see-through, with the wallpaper reading behind it.
-       If it is solid, picom did not start: run 'picom' by hand and read the
-       error (a driver without a usable GLX backend is the usual one --
-       'picom --backend xrender' is the fallback).
+    4. kitty is 90% opaque, which against a near-black wallpaper is subtle on
+       purpose -- the giveaway is the wallpaper's wordmark ghosting through as
+       a slightly lighter band across the middle of the window. Do not judge it
+       by eye; check the compositor is up:
+           pgrep -a picom
+       If it is not running, start it by hand and read the error (a driver with
+       no usable GLX backend is the usual one, and 'picom --backend xrender'
+       is the fallback).
     5. Screen auto-locks after 5 minutes idle (xss-lock).
     6. MAC randomization is on. If a captive portal or a MAC-allowlisted
        network refuses you, that is why:
