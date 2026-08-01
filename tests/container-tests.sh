@@ -308,6 +308,81 @@ t_dots_phase() {
     (( unguarded )) || pass "every dots-overlapping definition sits inside the guard"
 }
 
+# T11 -- the desktop wallpaper. ~/.fehbg is written by dots' install.sh
+# (hook_wallpaper), not by this script: the deploy owns the mechanism -- feh in
+# the package list, i3 running ~/.fehbg at session start -- and dots owns the
+# image. That split is why this went unnoticed. The defect that left boxes on
+# Kali's stock prompt left them on Kali's stock background too, from the same
+# skipped phase, and nothing here was watching the second one.
+#
+# kali-deploy-physical only: feh is in this script's package list and not the
+# remote's, and a headless box has no session to draw a background in.
+t_wallpaper() {
+    head_ "T11: the wallpaper lands via the dots phase"
+
+    if ! GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/owlshells/dots.git &>/dev/null; then
+        echo "    (github.com unreachable -- skipped, this needs a real checkout)"
+        return
+    fi
+
+    rm -rf "$USER_HOME/dots" "$USER_HOME/.fehbg"
+
+    # feh is not installed yet, which is the headless case: the hook must skip
+    # rather than leave a ~/.fehbg that i3 would exec into a missing binary.
+    as_sudo --only dots >/tmp/wall0.log 2>&1
+    [[ ! -e "$USER_HOME/.fehbg" ]] \
+        && pass "no ~/.fehbg written on a box without feh" \
+        || fail "wrote ~/.fehbg despite feh being absent"
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        --no-install-recommends feh >/dev/null 2>&1
+    if ! command -v feh &>/dev/null; then
+        echo "    (feh unavailable in this image -- skipping the rest)"
+        return
+    fi
+
+    rm -rf "$USER_HOME/dots"
+    as_sudo --only dots >/tmp/wall1.log 2>&1
+
+    [[ -f "$USER_HOME/dots/terminal/wallpaper.png" ]] \
+        && pass "the checkout carries terminal/wallpaper.png" \
+        || fail "no terminal/wallpaper.png in the checkout"
+
+    # i3's line is `[ -x $HOME/.fehbg ] && $HOME/.fehbg`, so a file that exists
+    # but is not executable is silently no desktop background at all.
+    [[ -x "$USER_HOME/.fehbg" ]] \
+        && pass "the ~/.fehbg hook exists and is executable (i3's guard tests -x)" \
+        || fail "the ~/.fehbg hook is missing or not executable -- i3 will skip it"
+
+    head -1 "$USER_HOME/.fehbg" 2>/dev/null | grep -q '^#!' \
+        && pass "the ~/.fehbg hook starts with a shebang" \
+        || fail "the ~/.fehbg hook has no shebang -- i3 cannot exec it"
+
+    grep -q 'dots/terminal/wallpaper.png' "$USER_HOME/.fehbg" 2>/dev/null \
+        && pass "the ~/.fehbg hook points at the dots wallpaper" \
+        || { fail "the ~/.fehbg hook does not reference the dots wallpaper"
+             sed 's/^/      /' "$USER_HOME/.fehbg" 2>/dev/null; }
+
+    # A background already on the box is never overruled -- correct, since a
+    # re-run must not discard one you picked. The cost is that a box deployed
+    # while the dots phase was broken keeps whatever it had and a re-deploy will
+    # not repair it, so this is asserted to keep the behaviour deliberate.
+    printf '#!/bin/sh\nfeh --bg-fill /usr/share/images/desktop-base/kali.png\n' \
+        > "$USER_HOME/.fehbg"
+    chmod 755 "$USER_HOME/.fehbg"
+    chown "$TEST_USER:$TEST_USER" "$USER_HOME/.fehbg"
+    rm -rf "$USER_HOME/dots"
+    as_sudo --only dots >/tmp/wall2.log 2>&1
+    grep -q 'kali.png' "$USER_HOME/.fehbg" \
+        && pass "an existing ~/.fehbg is left alone" \
+        || fail "clobbered a background that was already set"
+
+    # Put the container back as it was found. feh is not in the remote script's
+    # package list and its dots phase runs later in this same suite.
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq feh >/dev/null 2>&1
+    rm -rf "$USER_HOME/dots" "$USER_HOME/.fehbg"
+}
+
 # T8 -- bad input is rejected, and --help stays clean.
 t_bad_input() {
     head_ "T8: bad input is rejected"
@@ -408,6 +483,7 @@ fi
 
 t_idempotent_shell '>>> kali-deploy-physical >>>'
 t_dots_phase '>>> kali-deploy-physical >>>'
+t_wallpaper
 
 as_sudo --only i3 --only polybar --only kitty >/tmp/rerun.log 2>&1 \
     && pass "config phases re-run cleanly" \
