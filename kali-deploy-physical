@@ -1089,6 +1089,17 @@ if should_run kitty; then
 
     KITTY_DIR="$USER_HOME/.config/kitty"
 
+    # kitten themes writes dark-theme.auto.conf / light-theme.auto.conf when a
+    # selection is confirmed and the OS reports a matching colour-scheme
+    # preference. kitty loads whichever one matches automatically, appended
+    # after kitty.conf, with no include line needed -- so a theme picked
+    # interactively on a prior session silently outlives this deploy and wins
+    # over every colour set below. current-theme.conf is the same hazard for
+    # a manual/non-auto save. Cleared so kitty.conf is the only thing setting
+    # colours, every run.
+    run rm -f "$KITTY_DIR/dark-theme.auto.conf" "$KITTY_DIR/light-theme.auto.conf" \
+              "$KITTY_DIR/current-theme.conf"
+
     write_file "$KITTY_DIR/kitty.conf" <<'KITTY'
 # The desktop phase installs this face. If it is missing -- fetch failed, or
 # --only kitty on a box that never ran desktop -- kitty falls back to its own
