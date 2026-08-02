@@ -1057,7 +1057,7 @@ xft-hintstyle=slight
 xft-rgba=rgb
 hide-user-image=true
 round-user-image=false
-position=50% 62%
+position=50% 50%
 clock-format=%H:%M
 indicators=~spacer;~clock;~spacer;~session;~power
 GREETER
