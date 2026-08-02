@@ -526,12 +526,41 @@ t_lock_and_greeter() {
         && pass "greeter GTK theme written (its only route to custom colour)" \
         || fail "no $gcss -- theme-name points at nothing"
 
+    # Naming a theme replaces Adwaita rather than extending it. Without this
+    # import every widget loses its base style and the login box renders as a
+    # small pale rectangle, silently.
+    grep -q '@import.*Adwaita' "$gcss" 2>/dev/null \
+        && pass "the theme extends Adwaita instead of replacing it" \
+        || fail "no Adwaita import -- widgets will render with no base style"
+
+    # `position=50% 50%` is NOT the documented default: a string with no anchor
+    # part parses to anchor=start, which pins the window's top-left to the
+    # centre point instead of centring it. Omitting the key is the only way.
+    grep -q '^position=' "$gconf" 2>/dev/null \
+        && fail "position= is set -- without an explicit anchor this off-centres the window" \
+        || pass "no position= key, so the centred default applies"
+
     # The whole point: one image, both surfaces, and a path the lightdm user can
     # actually read. Anything under $USER_HOME is silently never drawn.
     local img=/usr/share/backgrounds/owlshells/lock.png
     grep -q "^background=$img" "$gconf" 2>/dev/null \
         && pass "greeter points at the shared image" \
         || fail "greeter background is not the shared image"
+
+    # The published image must be the owl composite, not the desktop wallpaper.
+    # They are different pictures on purpose -- the GitS card stays on the
+    # desktop, the bird goes on the screens you are locked behind -- and pointing
+    # this back at wallpaper.png would read as a tidy-up rather than a mistake.
+    grep -q 'owl-lock\.png' "$SCRIPT" \
+        && pass "the dots phase publishes the owl composite" \
+        || fail "publish source is not owl-lock.png"
+    # Comments stripped first: the block deliberately names wallpaper.png to say
+    # it is NOT the source, and grepping the prose flags the explanation as the
+    # very thing it is explaining.
+    sed -n '/Publish the lock.login image/,/^        return 0/p' "$SCRIPT" \
+        | grep -vE '^[[:space:]]*#' | grep -q 'terminal/wallpaper\.png' \
+        && fail "the lock image is being taken from the desktop wallpaper again" \
+        || pass "the desktop wallpaper is not reused as the lock image"
     grep -qE "^background=$USER_HOME|^background=~" "$gconf" 2>/dev/null \
         && fail "greeter background is under \$HOME -- lightdm cannot read it" \
         || pass "greeter background is outside \$HOME"

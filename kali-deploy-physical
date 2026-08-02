@@ -1044,6 +1044,16 @@ BLSRC
     #
     # hide-user-image kills the avatar circle. round-user-image is set too, so
     # that a box where an avatar does exist doesn't reintroduce a circle.
+    #
+    # No `position` line, deliberately, and it must stay that way. Writing the
+    # documented default `position=50% 50%` does NOT reproduce the default: the
+    # built-in WINDOW_POS_CENTER carries anchor=0 (centre), but
+    # read_position_from_str() gives a string with no explicit anchor part
+    # anchor=-1 (start), and get_absolute_position() then skips the `x -=
+    # window/2` step. The result is the window's top-left corner pinned to the
+    # centre of the screen, i.e. visibly down and to the right. Omitting the key
+    # is the only way to get the centred default; if it ever needs to move, the
+    # syntax is `position=50%,center 40%,center` -- the anchor is not optional.
     write_file /etc/lightdm/lightdm-gtk-greeter.conf <<'GREETER'
 # Written by kali-deploy-physical.
 [greeter]
@@ -1057,7 +1067,6 @@ xft-hintstyle=slight
 xft-rgba=rgb
 hide-user-image=true
 round-user-image=false
-position=50% 50%
 clock-format=%H:%M
 indicators=~spacer;~clock;~spacer;~session;~power
 GREETER
@@ -1078,6 +1087,16 @@ GREETER
    "for lightdm-gtk-greeter 1.8" and names widgets that no longer exist. The
    element-form menubar selectors match what the greeter's own fallback CSS
    uses on this version. */
+
+/* This import is load bearing. Naming a theme REPLACES Adwaita rather than
+   extending it, so a gtk.css of pure overrides leaves every widget with no base
+   style at all -- the login box renders as a small pale unstyled rectangle, and
+   nothing anywhere reports a problem. Pulling in GTK's built-in dark Adwaita
+   first gives the widgets their padding, borders and states back; everything
+   below is then an override on top of a working theme rather than the whole of
+   one. The resource path is compiled into libgtk-3, so there is no file to
+   install and nothing to keep in sync. */
+@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");
 
 /* The ground, and what shows if the image is ever missing. */
 .lightdm-gtk-greeter,
@@ -1721,28 +1740,38 @@ if should_run dots; then
         [[ -x "$DOTS_DIR/tools/backfill-index.sh" ]] \
             && as_user "$DOTS_DIR/tools/backfill-index.sh" >/dev/null 2>&1
 
-        # Publish the wallpaper for the lock screen and the greeter.
+        # Publish the lock/login image.
         #
-        # It has to leave $HOME. The greeter runs as the `lightdm` user, which
-        # cannot read your home directory, so a background pointed anywhere
-        # under ~/ is silently never drawn. Copied rather than symlinked for the
-        # same reason: a link into a home it cannot traverse is no better.
+        # The owl, deliberately, and NOT terminal/wallpaper.png -- that one is
+        # the Ghost in the Shell card and belongs to the desktop. The two
+        # screens you are shut out behind get the bird. They are different
+        # pictures on purpose, so swapping this path back to the wallpaper would
+        # look like a tidy-up and would be wrong.
+        #
+        # dots' install.sh composites it (owl on #282828, at screen proportions,
+        # lifted clear of where the login box lands) and leaves it in
+        # ~/.local/share/dots. It cannot do the next bit: the greeter runs as
+        # the `lightdm` user, which cannot read this home at all, so a
+        # background pointed anywhere under ~/ is silently never drawn. Copied
+        # rather than symlinked for the same reason -- a link into a home it
+        # cannot traverse is no better.
         #
         # This is the dots phase and not the i3 phase because this is where the
-        # image exists -- same division as the owl, which dots renders and the
-        # kitty phase merely leaves room for. The i3 phase has already written
-        # both configs pointing at this path; if this phase skipped, they fall
-        # back to flat #282828 rather than breaking.
-        local wp="$DOTS_DIR/terminal/wallpaper.png"
-        if [[ -f "$wp" ]]; then
+        # image exists. The i3 phase has already written both configs pointing
+        # at the published path; if this phase skips, or Pillow is missing so
+        # dots never generated it, both fall back to flat #282828 rather than
+        # breaking.
+        local owl="$USER_HOME/.local/share/dots/owl-lock.png"
+        if [[ -f "$owl" ]]; then
             install -d -m 755 /usr/share/backgrounds/owlshells
-            if install -m 644 "$wp" /usr/share/backgrounds/owlshells/lock.png; then
+            if install -m 644 "$owl" /usr/share/backgrounds/owlshells/lock.png; then
                 msg "lock/login image published to /usr/share/backgrounds/owlshells/lock.png"
             else
                 warn "could not publish the lock image -- greeter stays on flat colour"
             fi
         else
-            warn "no terminal/wallpaper.png in the checkout -- lock and greeter stay flat"
+            warn "no owl-lock.png from dots (Pillow missing?) -- lock and greeter stay flat"
+            warn "  install python3-pil and re-run: sudo $0 --only dots"
         fi
         return 0
     }
