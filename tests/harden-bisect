@@ -1,0 +1,263 @@
+#!/bin/bash
+
+# harden-bisect -- find out which hardening control, if any, breaks the
+# ConnectWise Control agent.
+#
+# The question this answers: the harden phase and a dead ScreenConnect relay
+# showed up together, and "together" is not "because of". This applies the
+# controls the phase used to set, ONE AT A TIME, against a known-good agent,
+# and reports which one drops the relay socket. If none do, hardening is
+# exonerated and the cause is somewhere else (picom, boot ordering, the vendor's
+# own wedge bug).
+#
+# Run it on a box where the agent is ALREADY CONNECTED. It refuses to start
+# otherwise -- you cannot bisect a failure from a broken baseline.
+#
+# Usage:
+#   sudo ./harden-bisect              # run the bisect
+#   sudo ./harden-bisect --revert     # undo everything, if a run was cut short
+#
+# Safety. Each control is reverted as soon as it has been measured, and the
+# risky one (MAC cloning, which can blackhole a VM's network outright when the
+# hypervisor does not permit MAC spoofing) gets a systemd-scheduled revert armed
+# BEFORE it is applied. That timer is owned by systemd, not by this shell, so it
+# still fires when the change kills the session this script is running in --
+# which is the exact failure being tested for. Worst case you lose the box for
+# REVERT_AFTER seconds and it comes back on its own.
+
+set -uo pipefail
+
+readonly REVERT_AFTER=90     # seconds before the armed revert fires
+readonly SETTLE=20           # seconds to wait for the socket to react
+readonly MACCONF="/etc/NetworkManager/conf.d/00-macrandomize.conf"
+readonly REVERT_UNIT="harden-bisect-revert"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+msg()  { echo -e "${GREEN}[+]${NC} $1"; }
+warn() { echo -e "${YELLOW}[*]${NC} $1" >&2; }
+err()  { echo -e "${RED}[!]${NC} $1" >&2; }
+head_(){ echo -e "\n${BLUE}=== $1 ===${NC}"; }
+
+[[ $EUID -eq 0 ]] || { err "run with sudo"; exit 1; }
+
+# ------------------------------------------------------------------------------
+# Agent discovery and the health check
+# ------------------------------------------------------------------------------
+
+INSTANCE=""
+for d in /opt/connectwisecontrol-*; do
+    [[ -d "$d" ]] && { INSTANCE=$(basename "$d"); break; }
+done
+
+PORT=8041
+if [[ -n "$INSTANCE" ]]; then
+    p=$(grep -oP '(?<=p=)[0-9]+' "/opt/$INSTANCE/ClientLaunchParameters.txt" 2>/dev/null | head -1)
+    [[ -n "$p" ]] && PORT="$p"
+fi
+
+# Health is the established socket. NOT the process, NOT the unit state: the
+# vendor's wedge bug leaves java running and the unit "active (exited)" with no
+# relay connection at all, so both of those report healthy while the box is
+# unreachable. This is the only check that distinguishes them.
+connected() {
+    ss -tanp 2>/dev/null | grep java | grep -q ":$PORT"
+}
+
+# Wait up to $SETTLE for the socket to GO AWAY. A control that breaks the agent
+# rarely does so instantly -- a firewall drop has to wait for conntrack, a MAC
+# change has to wait for the lease -- so a single check right after applying
+# would call almost everything innocent.
+still_connected_after_settle() {
+    local i
+    for (( i = 0; i < SETTLE; i++ )); do
+        connected || return 1
+        sleep 1
+    done
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# Revert
+# ------------------------------------------------------------------------------
+
+revert_all() {
+    rm -f "$MACCONF"
+    systemctl reload NetworkManager 2>/dev/null
+    command -v ufw &>/dev/null && ufw --force disable >/dev/null 2>&1
+    systemctl enable --now ssh.service       >/dev/null 2>&1
+    systemctl enable --now bluetooth.service >/dev/null 2>&1
+    systemctl enable --now avahi-daemon.service >/dev/null 2>&1
+    systemctl enable --now cups.service      >/dev/null 2>&1
+    systemctl enable --now cups-browsed.service >/dev/null 2>&1
+}
+
+if [[ "${1:-}" == "--revert" ]]; then
+    head_ "Reverting everything"
+    revert_all
+    systemctl stop "${REVERT_UNIT}.timer" 2>/dev/null
+    msg "done -- controls undone, ufw off, units re-enabled"
+    exit 0
+fi
+
+# Arm a systemd-owned revert. transient unit, so nothing is left installed.
+arm_revert() {
+    systemd-run --unit="$REVERT_UNIT" --on-active="$REVERT_AFTER" \
+        --description="harden-bisect self-heal" \
+        /bin/bash -c "rm -f '$MACCONF'; systemctl restart NetworkManager" \
+        >/dev/null 2>&1 \
+        && msg "  armed a ${REVERT_AFTER}s self-heal (survives losing this session)" \
+        || warn "  could NOT arm the self-heal -- skipping the risky test"
+}
+
+disarm_revert() {
+    systemctl stop "${REVERT_UNIT}.timer" 2>/dev/null
+    systemctl stop "${REVERT_UNIT}.service" 2>/dev/null
+}
+
+# ------------------------------------------------------------------------------
+# Baseline
+# ------------------------------------------------------------------------------
+
+head_ "Baseline"
+
+if [[ -z "$INSTANCE" ]]; then
+    err "no /opt/connectwisecontrol-* -- the agent is not installed"
+    err "install it first; there is nothing to bisect"
+    exit 1
+fi
+msg "agent:    $INSTANCE"
+msg "relay port: $PORT"
+
+if ! connected; then
+    err "the agent is NOT connected right now"
+    err "  this test needs a working baseline -- otherwise every control 'breaks' it"
+    err "  fix the agent first:"
+    err "    sudo systemctl stop $INSTANCE"
+    err "    sudo pkill -f com.screenconnect"
+    err "    sudo systemctl start $INSTANCE"
+    err "  then re-run this"
+    exit 1
+fi
+msg "relay:    ${GREEN}connected${NC} -- good baseline"
+
+VIRT=$(systemd-detect-virt 2>/dev/null || echo none)
+msg "platform: $VIRT"
+
+RESULTS=()
+CULPRITS=()
+
+# $1 = label, $2 = apply fn, $3 = revert fn
+test_control() {
+    local label="$1" apply="$2" undo="$3"
+    head_ "Testing: $label"
+    # eval, not "$apply": these are shell fragments, not command names.
+    eval "$apply"
+    if still_connected_after_settle; then
+        msg "relay survived ${SETTLE}s -- ${GREEN}not the culprit${NC}"
+        RESULTS+=("OK   $label")
+    else
+        err "relay DROPPED -- ${RED}this control breaks the agent${NC}"
+        RESULTS+=("BREAK $label")
+        CULPRITS+=("$label")
+    fi
+    eval "$undo"
+    # Give the agent a chance to re-establish before the next control, so one
+    # failure doesn't cascade into every later test reporting a break.
+    local i
+    for (( i = 0; i < 30; i++ )); do connected && break; sleep 1; done
+    connected && msg "relay recovered" || warn "relay has NOT recovered -- later results are unreliable"
+}
+
+# ------------------------------------------------------------------------------
+# The controls, safest first
+# ------------------------------------------------------------------------------
+
+test_control "avahi + cups disabled" \
+    'systemctl disable --now avahi-daemon.service avahi-daemon.socket cups.service cups-browsed.service >/dev/null 2>&1; true' \
+    'systemctl enable --now avahi-daemon.service cups.service >/dev/null 2>&1; true'
+
+test_control "bluetooth disabled" \
+    'systemctl disable --now bluetooth.service >/dev/null 2>&1; true' \
+    'systemctl enable --now bluetooth.service >/dev/null 2>&1; true'
+
+test_control "sshd disabled" \
+    'systemctl disable --now ssh.service >/dev/null 2>&1; true' \
+    'systemctl enable --now ssh.service >/dev/null 2>&1; true'
+
+if command -v ufw &>/dev/null; then
+    # Expected to pass: the agent is outbound-only and conntrack keeps an
+    # established connection alive through a default-deny INBOUND policy. Tested
+    # anyway -- that reasoning is exactly the kind that turns out to be wrong.
+    test_control "ufw default-deny inbound" \
+        'ufw default deny incoming >/dev/null 2>&1; ufw default allow outgoing >/dev/null 2>&1; ufw --force enable >/dev/null 2>&1; true' \
+        'ufw --force disable >/dev/null 2>&1; true'
+else
+    warn "ufw not installed -- skipping that control"
+    RESULTS+=("SKIP ufw default-deny inbound")
+fi
+
+# --- The risky one. A cloned MAC gets a guest's traffic dropped outright when
+# the hypervisor does not permit MAC spoofing, so this can take the network out
+# from under the session running this script. Hence the armed revert.
+head_ "Testing: MAC cloning (random)"
+if [[ "$VIRT" != "none" ]]; then
+    warn "this is a $VIRT guest -- a cloned MAC may blackhole the network entirely"
+    warn "if this session dies, the box heals itself in ${REVERT_AFTER}s. Do not panic."
+fi
+arm_revert
+
+cat > "$MACCONF" <<'NMCONF'
+[device]
+wifi.scan-rand-mac-address=yes
+
+[connection]
+wifi.cloned-mac-address=random
+ethernet.cloned-mac-address=random
+NMCONF
+
+# Reload alone does not re-clone -- the MAC applies on the next activation, so
+# the connection has to actually bounce for this test to mean anything. This is
+# the step that can drop the session.
+systemctl reload NetworkManager 2>/dev/null
+nmcli networking off >/dev/null 2>&1; sleep 2; nmcli networking on >/dev/null 2>&1
+
+if still_connected_after_settle; then
+    msg "relay survived ${SETTLE}s -- ${GREEN}not the culprit${NC}"
+    RESULTS+=("OK   MAC cloning (random)")
+else
+    err "relay DROPPED -- ${RED}this control breaks the agent${NC}"
+    RESULTS+=("BREAK MAC cloning (random)")
+    CULPRITS+=("MAC cloning (random)")
+fi
+
+rm -f "$MACCONF"
+systemctl restart NetworkManager 2>/dev/null
+disarm_revert
+for (( i = 0; i < 45; i++ )); do connected && break; sleep 1; done
+
+# ------------------------------------------------------------------------------
+# Verdict
+# ------------------------------------------------------------------------------
+
+head_ "Verdict"
+printf '%s\n' "${RESULTS[@]}" | sed 's/^/  /'
+echo ""
+
+if (( ${#CULPRITS[@]} == 0 )); then
+    msg "No hardening control dropped the relay."
+    msg "Hardening is exonerated -- look at picom (rendering) and the vendor's"
+    msg "own wedge bug / boot ordering (reboot persistence) instead."
+else
+    err "Culprits:"
+    printf '%s\n' "${CULPRITS[@]}" | sed 's/^/    /'
+fi
+
+echo ""
+if connected; then
+    msg "final state: relay ${GREEN}connected${NC}, all controls reverted"
+else
+    warn "final state: relay NOT connected. Clear the vendor's wedge:"
+    warn "  sudo systemctl stop $INSTANCE"
+    warn "  sudo pkill -f com.screenconnect"
+    warn "  sudo systemctl start $INSTANCE"
+fi
