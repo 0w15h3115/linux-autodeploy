@@ -15,9 +15,14 @@ pentest tooling over Tor.
 | Script | Target | Desktop | Access |
 |---|---|---|---|
 | **`kali-deploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
+| **`kali-deploy-vm`** | Hyper-V guest you screen-share into | i3 + polybar + kitty, no compositor | ScreenConnect / ConnectWise Control agent |
 | **`kali-deploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
 | **`kali-deploy-remote`** *(on WSL)* | Kali under WSL2 — same script, detected | none | none; the access layer is skipped |
 | **`test-with-tails`** *(beta)* | Tails OS live session | Tails' own GNOME | everything over Tor; nothing persists |
+
+`kali-deploy-vm` is configuration only — it installs **no tools**, on the basis that
+a stock Kali image already ships `kali-linux-default`. Use `kali-deploy-physical`
+if you want the `kali-tools-*` metapackage set.
 
 Superseded Ubuntu scripts live in [`archive/`](archive/). `SPEC.md` covers the
 design reasoning behind the two Kali scripts.
@@ -167,6 +172,101 @@ that leaves you in whatever directory you quit from. Oh My Zsh is deliberately *
 installed — Kali already ships syntax highlighting and autosuggestions, and OMZ only
 adds startup cost. To remove, delete the block between the `kali-deploy-physical`
 markers in `~/.zshrc`.
+
+---
+
+## kali-deploy-vm
+
+For Kali as a Hyper-V guest that you reach with a remote-desktop agent instead of
+sitting at it. Configuration only — no tools, no firewall, no dotfiles.
+
+```bash
+sudo ./kali-deploy-vm
+sudo SC_URL='https://<you>.screenconnect.com/Bin/ConnectWiseControl.ClientSetup.deb?e=Access&y=Guest&t=' \
+     ./kali-deploy-vm --only screenconnect
+```
+
+Phases: `base hyperv desktop i3 polybar kitty shell screenconnect`
+
+Options are the same grammar as the other two, plus `--autologin` and
+`--compositor <xrender|glx|egl>`.
+
+### Why this isn't kali-deploy-physical with the laptop bits removed
+
+Three differences are load-bearing, and the first one is the reason the script
+exists at all:
+
+**No compositor.** A Hyper-V guest has no hardware GLX — Mesa falls back to
+llvmpipe. `picom --backend glx` fails *after* it has already mapped the composite
+overlay window, and that overlay is full-screen, opaque, and never made
+input-transparent. The result is a black screen that swallows every keystroke,
+with i3 running perfectly underneath: your terminal really did open, you just
+can't see or reach it. `kali-deploy-physical` hardcodes `--backend glx` (its
+header flags this as an untested assumption), which is exactly why it breaks on
+Hyper-V. This script starts no compositor; `--compositor xrender` opts back in
+with the backend that has no GL dependency.
+
+**No idle lock, no DPMS blanking.** On a remote box a blanked screen is
+indistinguishable from a hung one, and an idle lock you didn't ask for means
+typing a password down a laggy link to get back into a session you never left.
+`$mod+Escape` still locks manually.
+
+**Nothing that assumes hardware.** The battery module, the wireless module and
+the backlight keys are emitted only if `/sys` says the hardware is there — so the
+bar has no permanently-blank `BAT0` and no permanent "wlan down". These are
+probed, not assumed, so the script is still correct on bare metal.
+
+Two smaller ones that matter in practice: `sync_to_monitor no` in `kitty.conf`
+(vsync against a display that isn't real is what makes kitty paint late or appear
+to hang on software rendering), and `$mod+Shift+Return` bound to **xterm** as a
+fallback, because kitty wants OpenGL 3.3 and a tiling WM whose only terminal
+binding is broken is a box you can't use.
+
+### The screenconnect phase
+
+The agent is the second declared exception to "everything comes from the
+distribution's archive", for the same reason Tailscale is in `kali-deploy-remote`:
+it isn't packaged anywhere else and it *is* the access layer. Unlike Tailscale
+there's no apt repo — the `.deb` is generated per-instance and carries the
+instance fingerprint, so you have to supply the URL:
+
+| Variable | Meaning |
+|---|---|
+| `SC_URL` | ClientSetup URL from **Access → Build Installer → Linux** |
+| `SC_DEB` | path to an already-downloaded `.deb`; takes precedence |
+
+With neither set the phase **skips and prints what to do** — it is never a reason
+for the run to fail, and the desktop is already up by the time it runs.
+
+The phase installs the X libraries the agent links against before the `.deb`,
+because a missing one produces an agent that installs cleanly, starts cleanly, and
+shows you a black rectangle. `libicu` is resolved dynamically since its version
+suffix moves with every Debian import.
+
+### Autologin
+
+Off by default. With a greeter, a box that reboots comes back to a locked login
+screen the agent can still show you — you lose a password prompt. With
+`--autologin` it comes back to an unlocked desktop holding your keys, your loot and
+your shell history, reachable by anyone who reaches the agent. It's offered because
+some agent configurations only attach to an active user session, but it isn't a
+choice to make on someone's behalf.
+
+### Resolution
+
+Host-side on a Gen 2 VM — the guest's `hyperv_drm` takes its mode from the host and
+`xrandr` can't add modes it was never offered. From an elevated PowerShell prompt,
+VM powered off:
+
+```powershell
+Set-VMVideo -VMName <name> -HorizontalResolution 1920 -VerticalResolution 1080 -ResolutionType Single
+```
+
+### If you land in a black screen anyway
+
+`Ctrl+Alt+F3` for a TTY, log in, `unstick` (aliased by the `shell` phase — it's
+`pkill picom; i3-msg restart`), then `Ctrl+Alt+F7`. That path works regardless of
+what's on the display, so you're never actually locked out.
 
 ---
 
