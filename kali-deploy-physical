@@ -8,11 +8,15 @@
 #     the display manager) plus polybar and kitty
 #   - the v5 i3 / polybar / kitty configs
 #
-# Caveat: the i3 config execs picom with --backend glx hardcoded (picom 13
-# has no implicit backend fallback). Verified on Intel Iris Xe (i915) 2026-08-01,
-# but not probed -- a box with no usable GLX needs the picom line in the i3
-# phase changed to --backend xrender by hand. Not egl: picom 13 still reports
-# "the egl backend is still experimental, use with care" at startup.
+# The compositor picks its own backend. picom 13 has no implicit backend
+# fallback -- given one whose driver is unusable it exits rather than trying
+# another -- and this used to hardcode glx, which is right on an Intel iGPU and
+# wrong on every VM without GPU passthrough. The result there was i3 coming up
+# with no compositor at all and nothing saying why. /usr/local/bin/owl-picom now
+# tries glx then xrender (xrender first on a VM, where glx cannot work and takes
+# ~10s to admit it) and logs which one took to $XDG_RUNTIME_DIR/picom.log.
+# Not egl: picom 13 still reports "the egl backend is still experimental, use
+# with care" at startup.
 #
 # The i3 phase also writes ~/.config/picom/picom.conf, derived from Kali's.
 # Kali's ships options picom 13 deprecated, and picom raises a GUI warning
@@ -257,6 +261,10 @@ DESKTOP_PKGS=(
     feh
     wireplumber
     picom
+    # glxinfo, so owl-picom's log can say WHY a backend failed rather than only
+    # that it did. Diagnosing a desktop you cannot open a terminal in depends on
+    # the log being self-contained.
+    mesa-utils
 
     # Pillow, for the owl behind the terminal. dots' install.sh renders it from a
     # tracked mask with terminal/mkowl.py, whose only dependency this is, and
@@ -1209,16 +1217,17 @@ exec_always --no-startup-id [ -x $HOME/.fehbg ] && $HOME/.fehbg
 # Compositor. picom arrives inside kali-desktop-i3's tree but nothing starts
 # it, which is why this line exists.
 #
-# --backend glx is required explicitly: picom 13 dropped its implicit backend
-# fallback, and Kali's /etc/xdg/picom.conf doesn't set one either, so a bare
-# `picom` now hard-fails with "Backend not specified" instead of composing.
-# glx is what Intel iGPUs (i915, AIGLX/DRI2) support; drop to --backend
-# xrender by hand if a box turns out to have no usable GLX.
+# The backend is chosen at runtime by owl-picom, not hardcoded here. picom 13
+# dropped its implicit backend fallback, so it must be told one -- and this line
+# used to say glx unconditionally, which is correct on an Intel iGPU and wrong
+# on every VM without GPU passthrough. When glx has no usable driver picom does
+# not fall back, it exits, and i3 comes up with no compositor at all. owl-picom
+# tries glx, then xrender, and logs which one took.
 #
 # Foreground under flock, not `picom -b`: -b daemonises, the parent exits, and
 # flock releases the lock the moment it does -- which would leave the guard
 # guarding nothing. Same single-instance reasoning as autotiling above.
-exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/picom.lock picom --backend glx
+exec_always --no-startup-id flock -n $XDG_RUNTIME_DIR/picom.lock owl-picom
 
 # Brightness. brightnessctl writes /sys/class/backlight/<dev>/brightness, which
 # udev makes group-writable by `video` -- the user is already in that group on a
@@ -1290,6 +1299,66 @@ I3CONFIG
 exec betterlockscreen -l 2>/dev/null || exec i3lock -c 282828 -n
 OWLLOCK
     msg "lock wrapper written to /usr/local/bin/owl-lock"
+
+    # The compositor wrapper. picom 13 has no implicit backend fallback: told a
+    # backend whose driver is unusable it exits rather than trying another, and
+    # the i3 config's exec_always cannot express "try the next one". Hardcoding
+    # glx there was right on the Intel iGPU it was written on and wrong on every
+    # VM without GPU passthrough -- including the Hyper-V guests most of these
+    # deploys actually target, where the desktop came up with no compositor at
+    # all and nothing said why.
+    #
+    # Order matters: glx first so real hardware keeps the faster path, xrender
+    # second because it works everywhere, including on llvmpipe.
+    #
+    # The log is the point as much as the fallback is. A desktop that renders
+    # wrong is hard to diagnose from inside itself -- you cannot open a terminal
+    # to ask why the terminal is broken -- so this leaves the answer in a file
+    # readable from any other session.
+    write_file /usr/local/bin/owl-picom 755 <<'OWLPICOM'
+#!/bin/bash
+# Written by kali-deploy-physical. Starts picom on a backend that works on THIS
+# box, and records which one. Delete to go back to running picom by hand.
+LOG="${XDG_RUNTIME_DIR:-/tmp}/picom.log"
+
+# A VM without GPU passthrough has no usable GLX, and picom takes ~10s to fail
+# on it. Skipping straight to xrender there keeps the session from starting
+# with a visibly dead compositor.
+BACKENDS="glx xrender"
+if systemd-detect-virt --quiet 2>/dev/null; then
+    BACKENDS="xrender glx"
+fi
+
+{
+    echo "--- owl-picom $(date -Is) on $(systemd-detect-virt 2>/dev/null || echo bare-metal)"
+    # What GL this box actually has. llvmpipe or "direct rendering: No" is the
+    # whole explanation when glx fails, and it saves opening a terminal in a
+    # desktop that may not be able to show one.
+    glxinfo -B 2>/dev/null | grep -E "OpenGL renderer|OpenGL version|direct rendering" \
+        || echo "glxinfo unavailable (mesa-utils not installed)"
+} >> "$LOG"
+
+for backend in $BACKENDS; do
+    echo "trying --backend $backend" >> "$LOG"
+    picom --backend "$backend" >>"$LOG" 2>&1 &
+    pid=$!
+
+    # picom fails fast when a backend is unusable and keeps running when it is
+    # not, so surviving a few seconds is the test. There is no exit code to
+    # wait for in the success case -- it runs until the session ends.
+    sleep 4
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "picom running on $backend (pid $pid)" >> "$LOG"
+        wait "$pid"
+        exit $?
+    fi
+    echo "picom exited on $backend" >> "$LOG"
+done
+
+echo "no usable backend -- the desktop has NO compositor" >> "$LOG"
+exit 1
+OWLPICOM
+    msg "compositor wrapper written to /usr/local/bin/owl-picom"
 
     # betterlockscreen's theme. Colours are RRGGBBAA, and they are the prompt
     # palette: seafoam ring to match polybar's accent, lavender while verifying,
@@ -2266,14 +2335,14 @@ cat <<BANNER
     3. Mod is the Windows/Super key. Mod+Return = kitty, Mod+d = dmenu,
        Mod+Escape = lock. If Super does nothing, check the keyboard has one
        and that no other grabber (a VM client, a KVM switch) is eating it.
-    4. kitty is fully opaque and needs no compositor to render correctly. The
-       owl behind the text is drawn by kitty itself onto its own background, so
-       it survives picom being down. If windows have no shadows and i3 looks
-       flat, that is the compositor, not kitty:
-           pgrep -a picom
-       If it is not running, start it by hand and read the error (a driver with
-       no usable GLX backend is the usual one, and 'picom --backend xrender'
-       is the fallback).
+    4. If i3 renders wrong -- windows not repainting, the wallpaper showing
+       through where a terminal should be -- read the compositor log FIRST.
+       You cannot open a terminal to ask why the terminal is broken, so the
+       answer is written to a file any other session can read:
+           cat /run/user/$(id -u)/picom.log
+       It names the backend picom started on, or says it could not start at
+       all. A desktop with no compositor is the state to look for. Log in to
+       the Xfce session at the greeter to read it if i3 is unusable.
     5. Mod+Escape locks the screen. There is no idle timeout -- it locks on
        suspend and when you ask, and never in the middle of a job.
     6. Check monitor mode on your wireless adapter before you rely on it:
