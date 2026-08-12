@@ -736,10 +736,14 @@ grep -q 'SCREENCONNECT_URL not set' /tmp/sc1.log \
     && pass "screenconnect says why it skipped" \
     || fail "screenconnect skipped silently"
 
-# Nothing may be installed on the skip path.
-[[ ! -d /opt/connectwisecontrol-* ]] 2>/dev/null \
-    && pass "no agent installed without a URL" \
-    || fail "screenconnect installed an agent it was not given"
+# Nothing may be installed on the skip path. Globbed with compgen rather than
+# [[ -d /opt/connectwisecontrol-* ]], which does no pathname expansion inside
+# [[ ]] and so passes whether or not the agent is there.
+if compgen -G '/opt/connectwisecontrol-*' >/dev/null; then
+    fail "screenconnect installed an agent it was not given"
+else
+    pass "no agent installed without a URL"
+fi
 
 # --dry-run must not print the URL: run() echoes its arguments, which is exactly
 # the mistake this phase is written to avoid.
