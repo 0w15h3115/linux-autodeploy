@@ -14,8 +14,8 @@ pentest tooling over Tor.
 
 | Script | Target | Desktop | Access |
 |---|---|---|---|
-| **`kali-deploy-physical`** | Physical laptop or VM you sit at | i3 + polybar + kitty | local console, plus sshd |
-| **`kali-deploy-vm`** | Hyper-V guest, when you want *only* the desktop | i3 + polybar + kitty, no compositor | ScreenConnect / ConnectWise Control agent |
+| **`kali-deploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty, picom on glx | local console, plus sshd |
+| **`kali-deploy-vm`** | Hyper-V guest reached over a remote agent | i3 + polybar + kitty, no compositor | ScreenConnect / ConnectWise Control agent |
 | **`kali-deploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
 | **`kali-deploy-remote`** *(on WSL)* | Kali under WSL2 — same script, detected | none | none; the access layer is skipped |
 | **`test-with-tails`** *(beta)* | Tails OS live session | Tails' own GNOME | everything over Tor; nothing persists |
@@ -54,7 +54,7 @@ Options:
 -h, --help
 ```
 
-Phases: `base screenconnect tools desktop harden i3 polybar kitty shell dots wordlists`
+Phases: `base tools desktop harden i3 polybar kitty shell dots wordlists`
 
 Re-running is always safe — every phase is idempotent, so a run that dies partway
 can be resumed by running it again (or narrowed with `--only`). A full transcript
@@ -121,63 +121,6 @@ If a specific engagement wants a firewall policy, set it deliberately:
 fw-status                   # sudo ufw status verbose
 fw-open 8000/tcp            # sudo ufw allow 8000/tcp
 ```
-
-### The `screenconnect` phase
-
-Installs the ConnectWise Control agent, opt-in via `SCREENCONNECT_URL`. Unset and
-the phase says so and the run carries on — an RMM agent is never a reason to redo
-a deploy.
-
-```bash
-sudo SCREENCONNECT_URL='https://<control-host>/Bin/ScreenConnect.ClientSetup.deb?e=Access&y=Guest&c=...' \
-     ./kali-deploy-physical
-```
-
-It runs **right after `base`**, before the tools phase resolves 3000+ packages —
-so if the session running the deploy drops midway, there's a way back in to
-resume it.
-
-Prefer the `.deb` your Control server builds. `ScreenConnect.ClientSetup.sh` takes
-its RPM branch whenever `rpm(1)` exists, and on Debian that fails: ConnectWise's
-noarch RPMs ship unsigned and without file digests, while Debian's rpm defaults
-`%_pkgverify_level` to `all`, so the install dies on `does not verify: no digest`.
-A `.deb` skips the branch entirely. Given a `.sh` the phase relaxes pkgverify for
-the duration and restores it afterwards, including on the failure path.
-
-The URL carries session parameters (`y=`, `c=`, `s=`), and this script tees its
-whole run to `/var/log`. So the URL is never echoed, never passed through the
-`run()` helper (which prints its arguments under `--dry-run`), and scrubbed out of
-curl's stderr before anything is printed.
-
-**The phase gates success on an established socket to the relay, not on the
-process or the unit.** Both report healthy in the vendor's own failure case: the
-postinstall reports success while leaving a java process that never opens a relay
-socket, and because the init script has no PID file — its running check is
-`ps --ppid "$!" -o comm= | grep java` — the wedged process satisfies it, so every
-later `start` short-circuits with *"ScreenConnect is already started, please stop
-it first"* and does nothing. A `restart` will not clear it; the phase `pkill`s
-between stop and start.
-
-Diagnosing it by hand, the things that produce false negatives:
-
-| Command | Why it lies |
-|---|---|
-| `journalctl -u <unit>` | The agent logs to `/var/log/<unit>.log`, never journald. Always empty. |
-| `systemctl status` → `active (exited)` | Normal for this LSB-wrapped forking unit. Not a failure. |
-| `ss -tnp \| grep -i screenconnect` | `ss` shows the executable name — it's `java`. Grep `java` or `:8041`. |
-| `ss -tnp` with no state flag | Shows ESTAB only. Use `ss -tanp` to catch SYN_SENT. |
-| `find /var/run -name '*.pid'` | `/var/run` is a symlink to `/run`, and `find -P` won't descend into it. There are no PID files anyway. |
-
-```bash
-pgrep -af com.screenconnect          # process alive?
-sudo ss -tanp | grep java            # the real health check
-sudo tail -40 /var/log/connectwisecontrol-<id>.log
-```
-
-For engagement documentation: record the agent's presence, relay host and session
-GUID (all in `/opt/connectwisecontrol-<id>/ClientLaunchParameters.txt`). An
-unexplained RMM agent on an attack box reads exactly like the rogue ScreenConnect
-instances you'd flag in a client environment.
 
 ### The `dots` phase
 
@@ -281,7 +224,7 @@ sitting at it. Configuration only — no tools, no firewall, no dotfiles.
 
 ```bash
 sudo ./kali-deploy-vm
-sudo SC_URL='https://<you>.screenconnect.com/Bin/ConnectWiseControl.ClientSetup.deb?e=Access&y=Guest&t=' \
+sudo SCREENCONNECT_URL='https://<you>.screenconnect.com/Bin/ConnectWiseControl.ClientSetup.deb?e=Access&y=Guest&t=' \
      ./kali-deploy-vm --only screenconnect
 ```
 
@@ -292,19 +235,21 @@ Options are the same grammar as the other two, plus `--autologin` and
 
 ### How this differs from kali-deploy-physical
 
-`kali-deploy-physical` now handles a VM too: `owl-picom` picks a working backend
-at runtime, and it has its own `screenconnect` phase. **If you want the tools,
-use that one** — this script installs none, and that is the main reason to choose
-between them rather than any of the differences below.
+The split is deliberate: **`kali-deploy-physical` is for hardware you sit at, and
+stays that way.** It hardcodes `picom --backend glx`, which is correct on a real
+GPU and has worked on that deploy for as long as it's existed — there's no VM
+accommodation in it, and nothing here asks it to grow one. Pick between them on
+the target, not on the options.
 
-What remains distinct here:
+If you want the tools, use `kali-deploy-physical`; this script installs none.
 
-**No compositor at all**, rather than one that picks its backend. `owl-picom`
-tries xrender first on a VM, which is the right call — but it still tries glx
-second if xrender fails, and a failed glx attempt is what leaves an opaque
-composite overlay window that eats input. On a box reached by screen-scraping,
-compositing buys nothing you can see and costs bandwidth on every frame, so the
-safe default here is none. `--compositor xrender` opts back in.
+**No compositor.** A Hyper-V guest has no hardware GLX — Mesa falls back to
+llvmpipe. `picom --backend glx` fails *after* it has already mapped the composite
+overlay window, and that overlay is full-screen, opaque, and never made
+input-transparent: a black screen that swallows every keystroke, with i3 running
+fine underneath. Beyond that, on a box reached by screen-scraping, compositing
+buys nothing you can see and costs bandwidth on every frame. `--compositor
+xrender` opts back in with the backend that has no GL dependency.
 
 **No idle lock, no DPMS blanking.** On a remote box a blanked screen is
 indistinguishable from a hung one, and an idle lock you didn't ask for means
@@ -389,10 +334,11 @@ because a missing one produces an agent that installs cleanly, starts cleanly, a
 shows you a black rectangle. `libicu` is resolved dynamically since its version
 suffix moves with every Debian import.
 
-Note `kali-deploy-physical`'s own screenconnect phase handles two vendor install
-bugs this one doesn't — the unsigned-RPM path taken by `ClientSetup.sh` on Debian,
-and pkgverify relaxation. This phase takes the `.deb` only. Prefer the `.deb` your
-Control server builds either way.
+This phase takes a `.deb` only — prefer the one your Control server builds.
+`ClientSetup.sh` takes its RPM branch whenever `rpm(1)` exists, and on Debian that
+fails: ConnectWise's noarch RPMs ship unsigned and without file digests, while
+Debian's rpm defaults `%_pkgverify_level` to `all`, so the install dies on
+`does not verify: no digest`. A `.deb` skips the branch entirely.
 
 ### Autologin
 

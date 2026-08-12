@@ -4,8 +4,15 @@ Why these scripts are built the way they are. The README covers usage; this
 covers the reasoning, so that a change doesn't quietly undo a decision that was
 made for a reason.
 
-Applies to `kali-deploy-physical` and `kali-deploy-remote`. The Ubuntu
-scripts in `archive/` predate most of it.
+Applies to `kali-deploy-physical`, `kali-deploy-remote` and `kali-deploy-vm`. The
+Ubuntu scripts in `archive/` predate most of it.
+
+The three split on target, not on options: hardware you sit at, a headless box you
+reach over Tailscale, and a guest you reach over a remote-desktop agent. That is
+why `kali-deploy-physical` hardcodes `picom --backend glx` and is left that way —
+it is correct on a real GPU, and a VM's graphics stack is `kali-deploy-vm`'s
+problem to have. Teaching one script to detect the other's platform is how both
+end up carrying accommodations neither target needs.
 
 ## The requirement everything else follows from
 

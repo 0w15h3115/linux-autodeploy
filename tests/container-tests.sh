@@ -721,52 +721,6 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-head_ "T6c: the screenconnect phase is opt-in and never leaks its URL"
-# The URL carries session parameters and the script tees its run to /var/log, so
-# a leak here outlives the deploy. Asserted rather than reviewed.
-# ------------------------------------------------------------------------------
-if as_sudo --only screenconnect >/tmp/sc1.log 2>&1; then
-    pass "screenconnect exits 0 with SCREENCONNECT_URL unset"
-else
-    fail "screenconnect exited non-zero with no URL set"
-    tail -15 /tmp/sc1.log | sed 's/^/    /'
-fi
-
-grep -q 'SCREENCONNECT_URL not set' /tmp/sc1.log \
-    && pass "screenconnect says why it skipped" \
-    || fail "screenconnect skipped silently"
-
-# Nothing may be installed on the skip path. Globbed with compgen rather than
-# [[ -d /opt/connectwisecontrol-* ]], which does no pathname expansion inside
-# [[ ]] and so passes whether or not the agent is there.
-if compgen -G '/opt/connectwisecontrol-*' >/dev/null; then
-    fail "screenconnect installed an agent it was not given"
-else
-    pass "no agent installed without a URL"
-fi
-
-# --dry-run must not print the URL: run() echoes its arguments, which is exactly
-# the mistake this phase is written to avoid.
-SC_SECRET='https://ctrl.invalid/Bin/ScreenConnect.ClientSetup.deb?e=Access&y=Guest&c=CANARY_TOKEN_9f3a'
-SCREENCONNECT_URL="$SC_SECRET" as_sudo --dry-run --only screenconnect >/tmp/sc2.log 2>&1
-if grep -q 'CANARY_TOKEN_9f3a' /tmp/sc2.log; then
-    fail "the ClientSetup URL leaked into the transcript"
-    grep -n 'CANARY_TOKEN_9f3a' /tmp/sc2.log | sed 's/^/    /'
-else
-    pass "the ClientSetup URL stays out of the transcript"
-fi
-
-# A fetch failure must also scrub it -- curl can put the URL back in its stderr
-# on a redirect or proxy error, and that goes straight to /var/log.
-SCREENCONNECT_URL="$SC_SECRET" as_sudo --only screenconnect >/tmp/sc3.log 2>&1
-if grep -q 'CANARY_TOKEN_9f3a' /tmp/sc3.log; then
-    fail "the URL leaked via the fetch-failure path"
-    grep -n 'CANARY_TOKEN_9f3a' /tmp/sc3.log | sed 's/^/    /'
-else
-    pass "a failed fetch scrubs the URL"
-fi
-
-# ------------------------------------------------------------------------------
 head_ "T6b: the harden phase stays out of the tooling's way"
 # A general-purpose baseline breaks the tools this script installs. These assert
 # the specific controls that cost us an engagement's worth of debugging: a
