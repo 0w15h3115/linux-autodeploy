@@ -88,8 +88,8 @@ Aimed at a laptop that is physically with you on an untrusted LAN, not a remote 
 - `avahi-daemon` and `cups`/`cups-browsed` off — no mDNS or printer advertisement
 - `bluetooth.service` off (the BT *tools* are still installed)
 - NetworkManager MAC randomization: scan-time, plus a per-network (`stable`)
-  associated MAC. `--mac-random` makes the associated MAC per-*activation*
-  instead — see the caveat below before you reach for it.
+  associated MAC. Skipped on a VM — see the caveat below. `--mac-random` makes
+  the associated MAC per-*activation* and applies it on a VM too.
 - screen locks after 5 minutes idle via `xss-lock`
 
 The verification pass ends with an `ss -tulpn` listing of everything actually
@@ -165,6 +165,23 @@ end rather than claiming they passed:
    means a new MAC — and so a new DHCP lease and IP — on every reconnect, which
    tears down any long-lived outbound socket. The default is `stable` for this
    reason; you only get `random` by passing `--mac-random`.
+
+   On a **VM this is skipped entirely**, and an earlier run's config is removed.
+   A hypervisor's vSwitch forwards only frames whose source MAC it assigned to
+   the vNIC. Hyper-V exposes this as *Settings → Network Adapter → Advanced
+   Features → Enable MAC address spoofing*, **off by default**, and with it off
+   any cloned MAC — `stable` or `random`, the switch doesn't distinguish — gets
+   the guest's traffic dropped, and it stays dropped across reboots because each
+   boot re-applies it. If a VM deployed by an older version of this script has no
+   network, that's the first thing to check:
+
+   ```bash
+   ip link show                        # active MAC vs. the one Hyper-V assigned
+   sudo rm /etc/NetworkManager/conf.d/00-macrandomize.conf
+   sudo systemctl restart NetworkManager
+   ```
+
+   Re-running the deploy does the same thing for you.
 5. Verify monitor mode before relying on it: `sudo airmon-ng start wlan0`.
 
 ### Shell

@@ -34,12 +34,20 @@
 # per-activation randomization when you're somewhere that warrants it and
 # nothing on the box needs a durable connection.
 #
+# On a VM the whole thing is skipped, and an earlier run's config is removed.
+# A hypervisor's virtual switch forwards only frames whose source MAC it handed
+# out -- Hyper-V calls this "Enable MAC address spoofing" and ships it off -- so
+# any cloned MAC blackholes the guest, stable or random alike, and stays that way
+# across reboots. The hostile-LAN threat it defends against also isn't the one a
+# VM you reach over a remote session is facing. --mac-random forces it anyway,
+# for a host that does permit spoofing.
+#
 # Usage:
 #   sudo ./kali-deploy-physical [options]
 #
 #   --dry-run          show what would happen; change nothing
-#   --mac-random       per-activation MAC randomization instead of per-network
-#                      (breaks long-lived connections; see above)
+#   --mac-random       per-activation MAC randomization instead of per-network,
+#                      and applies it on a VM too (see the caveats above)
 #   --skip <phase>     skip a phase (repeatable)
 #   --only <phase>     run only these phases (repeatable)
 #   --list-phases      print phase names and exit
@@ -71,6 +79,7 @@ set -uo pipefail
 # ------------------------------------------------------------------------------
 
 readonly WORDLIST_DIR="/usr/share/wordlists"
+readonly MACCONF="/etc/NetworkManager/conf.d/00-macrandomize.conf"
 readonly ZSHRC_MARKER="# >>> kali-deploy-physical >>>"
 readonly ZSHRC_END_MARKER="# <<< kali-deploy-physical <<<"
 readonly MIN_DISK_GB=20
@@ -685,16 +694,56 @@ if should_run harden; then
     # so much as reconnects. `stable` is a per-profile MAC: the hardware address
     # still never leaves the machine, and a network you return to sees the same
     # address, so the lease survives.
-    if (( MAC_RANDOM )); then
-        MAC_MODE="random"
-        MAC_NOTE="fresh MAC per activation -- long-lived connections will drop"
+    #
+    # Skipped entirely on a VM. A hypervisor's virtual switch generally forwards
+    # only frames whose source MAC is the one it handed the vNIC: on Hyper-V that
+    # is the "Enable MAC address spoofing" checkbox under the adapter's Advanced
+    # Features, and it is off by default. With it off, a cloned MAC -- stable or
+    # random, the switch doesn't care which -- gets the guest's traffic dropped
+    # on the floor, and it stays dropped across reboots because every boot
+    # re-applies it. The threat this setting answers is a laptop associating to a
+    # hostile LAN; a VM reached over a remote session isn't facing it.
+    #
+    # --mac-random still overrides, for a host that does have spoofing enabled.
+    if systemd-detect-virt --quiet 2>/dev/null; then
+        MAC_VIRT=$(systemd-detect-virt 2>/dev/null) || MAC_VIRT="a hypervisor"
     else
-        MAC_MODE="stable"
-        MAC_NOTE="per-network MAC -- pass --mac-random for per-activation"
+        MAC_VIRT=""
     fi
 
-    msg "Configuring NetworkManager MAC randomization ($MAC_MODE)..."
-    write_file /etc/NetworkManager/conf.d/00-macrandomize.conf <<NMCONF
+    if [[ -n "$MAC_VIRT" ]] && (( ! MAC_RANDOM )); then
+        msg "Skipping MAC randomization ($MAC_VIRT guest)"
+        msg "  a cloned MAC is dropped by the vSwitch unless the host allows spoofing"
+        msg "  pass --mac-random to force it anyway"
+
+        # Remove rather than merely skip. A box deployed by an earlier run still
+        # has the file, and that file is why its network is down -- re-running
+        # the script is the documented way to fix a box, so it has to undo this.
+        if [[ -f "$MACCONF" ]]; then
+            if run rm -f "$MACCONF"; then
+                msg "  removed $MACCONF left by an earlier run"
+                run systemctl reload NetworkManager 2>/dev/null \
+                    || warn "could not reload NetworkManager (applies on next start)"
+            else
+                warn "could not remove $MACCONF"
+            fi
+        fi
+    else
+        if (( MAC_RANDOM )); then
+            MAC_MODE="random"
+            MAC_NOTE="fresh MAC per activation -- long-lived connections will drop"
+        else
+            MAC_MODE="stable"
+            MAC_NOTE="per-network MAC -- pass --mac-random for per-activation"
+        fi
+
+        if [[ -n "$MAC_VIRT" ]]; then
+            warn "forcing MAC randomization on a $MAC_VIRT guest"
+            warn "  the host must have MAC spoofing enabled or this box loses the network"
+        fi
+
+        msg "Configuring NetworkManager MAC randomization ($MAC_MODE)..."
+        write_file "$MACCONF" <<NMCONF
 # Managed by kali-deploy-physical -- MAC randomization.
 # scan-rand-mac-address randomizes the MAC used while scanning for networks;
 # cloned-mac-address hides the hardware MAC when associating. Delete this file
@@ -709,9 +758,10 @@ wifi.scan-rand-mac-address=yes
 wifi.cloned-mac-address=$MAC_MODE
 ethernet.cloned-mac-address=$MAC_MODE
 NMCONF
-    msg "  $MAC_NOTE"
-    run systemctl reload NetworkManager 2>/dev/null \
-        || warn "could not reload NetworkManager (applies on next start)"
+        msg "  $MAC_NOTE"
+        run systemctl reload NetworkManager 2>/dev/null \
+            || warn "could not reload NetworkManager (applies on next start)"
+    fi
 
     # --- Firewall. Default-deny inbound. No lockout risk: you have the keyboard.
     if command -v ufw &>/dev/null; then
@@ -1918,12 +1968,11 @@ done
 # runs even when the harden phase was skipped, and what's on disk is what
 # NetworkManager will act on. `random` here is the first thing to check if a
 # long-lived connection on this box keeps dropping.
-NMCONF_PATH="/etc/NetworkManager/conf.d/00-macrandomize.conf"
-if [[ -f "$NMCONF_PATH" ]]; then
+if [[ -f "$MACCONF" ]]; then
     echo "  MAC: $(awk -F= '/^ethernet.cloned-mac-address/ {print $2}' \
-                  "$NMCONF_PATH" 2>/dev/null || echo "unreadable")"
+                  "$MACCONF" 2>/dev/null || echo "unreadable")"
 else
-    echo "  MAC: stock (no $NMCONF_PATH)"
+    echo "  MAC: stock (hardware MAC, no cloning)"
 fi
 
 # The real hardening deliverable: what is actually listening, right now. Read
