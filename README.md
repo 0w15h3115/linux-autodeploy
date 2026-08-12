@@ -329,22 +329,43 @@ binding is broken is a box you can't use.
 
 ### The screenconnect phase
 
-**It asks you for the URL.** Run the script with nothing set and the phase prompts:
+**It asks you for the URL.** Run the script with nothing set and the phase prompts,
+reads it back for proofreading, and lets you re-enter up to three times:
 
 ```
 [+] The ScreenConnect agent needs the installer URL from your instance.
 [+]   Access -> Build Installer -> Linux -> copy the .deb link.
-[+]   Paste it below, or press Enter alone to skip this phase.
 
-  URL: 
-[+] got a URL for https://acme.screenconnect.com (parameters hidden)
+[+]   No clipboard in the guest yet? Two ways round it:
+[+]     - VMConnect menu: Clipboard -> Type clipboard text
+[+]     - or serve the .deb off the host and type a short LAN URL
+
+  URL: https://acme.screenconnect.com/Bin/...
+
+  You typed:
+    https://acme.screenconnect.com/Bin/ConnectWiseControl.ClientSetup.deb?e=...
+
+  Correct? [Y/n] 
+[+] got a URL for https://acme.screenconnect.com
 ```
 
-The paste is read silently and confirmed back **by host only**. The URL carries
-session parameters (`y=`, `c=`, `s=`) and the script tees its whole run to
-`/var/log`, so it's never echoed, never passed through the `run()` helper (which
-prints its arguments under `--dry-run`), and scrubbed out of curl's stderr before
-any error is printed.
+The proofreading matters because **this is the phase that bootstraps the
+clipboard** — until the agent is up, a Hyper-V guest in a basic VMConnect session
+has no path from the host clipboard, and the URL is ~150 characters of session
+parameters. If you have to type it by hand, a one-shot prompt that only fails at
+download time is not usable. Surrounding whitespace is trimmed, since
+*Type clipboard text* can pick up a stray leading space or trailing newline.
+
+The read-back goes to `/dev/tty`, **not** through stdout — stdout is teed to
+`/var/log` and the URL carries session parameters (`y=`, `c=`, `s=`), so echoing it
+into the transcript would defeat every other guard here. Only the host is logged.
+The URL is also never passed through the `run()` helper (which prints its
+arguments under `--dry-run`), and it's scrubbed out of curl's stderr before any
+error is printed.
+
+If you'd rather not type it at all: serve the `.deb` from the Windows host
+(`python -m http.server 8000`) and type a short LAN URL instead — the phase takes
+any URL, not just a Control one.
 
 The prompt appears **only when stdin is a terminal** and not under `--dry-run`.
 SPEC.md rules out interactive prompts because a prompt that hangs an unattended

@@ -1061,26 +1061,74 @@ if should_run screenconnect; then
         echo
         msg "The ScreenConnect agent needs the installer URL from your instance."
         msg "  Access -> Build Installer -> Linux -> copy the .deb link."
-        msg "  Paste it below, or press Enter alone to skip this phase."
         echo
-        # Silent read. The URL carries session parameters (y=, c=, s=) and this
-        # script tees its whole run to /var/log -- an echoed paste would be
-        # sitting in the transcript in plaintext. Confirmed back by host only.
-        printf '  URL: '
-        read -rs sc_answer
+        # This is the phase that bootstraps the clipboard, so it is the one
+        # phase that cannot assume one: until the agent is up, a Hyper-V guest
+        # in a basic VMConnect session has no path from the host's clipboard,
+        # and the URL is ~150 characters of session parameters. Typing that by
+        # hand is a near-certain typo, so the two ways out come first, and the
+        # retry loop below assumes you had to type it anyway.
+        msg "  No clipboard in the guest yet? Two ways round it:"
+        msg "    - VMConnect menu: Clipboard -> Type clipboard text (sends the"
+        msg "      host clipboard as keystrokes; needs no integration services)"
+        msg "    - or serve the .deb off the host and type a short LAN URL:"
+        msg "      python -m http.server 8000   ->   http://<host-ip>:8000/sc.deb"
         echo
-        if [[ -n "$sc_answer" ]]; then
-            SCREENCONNECT_URL="$sc_answer"
-            # Show enough to catch a paste of the wrong thing, never enough to
-            # leak the session parameters.
-            sc_host=$(printf '%s' "$SCREENCONNECT_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
-            if [[ "$SCREENCONNECT_URL" =~ ^https?:// ]]; then
-                msg "got a URL for $sc_host (parameters hidden)"
-            else
-                warn "that does not look like a URL -- trying it anyway"
+        msg "  Enter alone skips this phase; the rest of the deploy is unaffected."
+        echo
+
+        # A visible read, deliberately. This was `read -rs` first, on the theory
+        # that an echoed paste would land in the /var/log transcript -- which is
+        # wrong: terminal echo is the tty line discipline writing to the
+        # terminal, not the script's stdout, so `tee` never sees it and the
+        # silence bought nothing. What it cost was the only feedback there is,
+        # and a prompt that shows nothing as you type reads as a hung script --
+        # which is precisely how it was reported. On a URL being typed by hand
+        # rather than pasted, seeing it is not a nicety.
+        for sc_try in 1 2 3; do
+            printf '  URL: '
+            read -r sc_answer || break
+
+            # Trim surrounding whitespace. "Type clipboard text" can pick up a
+            # trailing newline or a leading space from the copy, and a URL with
+            # a stray space fails in a way that reads as a server problem.
+            sc_answer="${sc_answer#"${sc_answer%%[![:space:]]*}"}"
+            sc_answer="${sc_answer%"${sc_answer##*[![:space:]]}"}"
+
+            [[ -z "$sc_answer" ]] && break          # Enter alone == skip
+
+            if [[ ! "$sc_answer" =~ ^https?:// ]]; then
+                warn "  that does not start with http:// or https:// (attempt $sc_try of 3)"
+                continue
             fi
-        fi
-        unset sc_answer
+
+            # Proofreading goes to /dev/tty, NOT through stdout. stdout is teed
+            # to /var/log and the URL carries session parameters (y=, c=, s=),
+            # so echoing it back for checking would put in the transcript the
+            # exact string every other guard here exists to keep out of it.
+            # You are looking at your own terminal; the log is not.
+            {
+                printf '\n  You typed:\n    %s\n\n' "$sc_answer"
+                printf '  Correct? [Y/n] '
+            } > /dev/tty
+            read -r sc_confirm < /dev/tty
+
+            case "$sc_confirm" in
+                n|N|no|NO|No)
+                    warn "  ok -- enter it again (attempt $sc_try of 3)"
+                    continue ;;
+                *)
+                    SCREENCONNECT_URL="$sc_answer"
+                    # By host into the log: enough to catch the wrong Control
+                    # instance, which you would otherwise discover only from an
+                    # agent that never checks in, without the parameters.
+                    sc_host=$(printf '%s' "$SCREENCONNECT_URL" \
+                              | sed -E 's#^(https?://[^/]+).*#\1#')
+                    msg "got a URL for $sc_host"
+                    break ;;
+            esac
+        done
+        unset sc_answer sc_confirm sc_try
     fi
 
     if [[ -z "${SCREENCONNECT_DEB:-}" && -z "${SCREENCONNECT_URL:-}" ]]; then
