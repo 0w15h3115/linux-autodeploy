@@ -65,8 +65,24 @@
 #                      then a plain anonymous clone, then skips (the rest of
 #                      the run is unaffected).
 #   DOTS_REPO          owner/name of the shell kit (default owlshells/dots)
+#   SCREENCONNECT_URL  a ClientSetup URL from your Control server. Unset means
+#                      the screenconnect phase skips and the run carries on.
+#                      Prefer the .deb the server builds -- it sidesteps the
+#                      installer's RPM branch, which fails on Debian because
+#                      ConnectWise's noarch RPMs ship without digests and
+#                      Debian's rpm verifies them. The URL carries session
+#                      parameters, so it is never echoed and never reaches the
+#                      /var/log transcript.
 #
-# Phases: base tools desktop harden i3 polybar kitty shell dots wordlists
+# Phases: base screenconnect tools desktop harden i3 polybar kitty shell dots
+#         wordlists
+#
+# The screenconnect phase also works around a postinstall that reports success
+# while leaving a java process with no relay socket -- the init script has no PID
+# file, so its process-grep check finds the wedged process and every later start
+# short-circuits. The phase pkills before starting, and gates success on an
+# established socket to the relay rather than on process liveness or unit state,
+# both of which report healthy in exactly that case.
 #
 # Design notes: an installer should keep going when an optional piece fails
 # rather than aborting -- you should never have to reinstall the OS because one
@@ -256,7 +272,9 @@ DESKTOP_PKGS=(
     python3-pil
 )
 
-readonly ALL_PHASES=(base tools desktop harden i3 polybar kitty shell dots wordlists)
+# screenconnect sits right after base, before the hour-long tools resolve: it is
+# the way back into the box if the session running this script drops midway.
+readonly ALL_PHASES=(base screenconnect tools desktop harden i3 polybar kitty shell dots wordlists)
 
 # Binaries the verification pass ticks at the end of a run. These are BINARY
 # names, not package names: certipy-ad ships /usr/bin/certipy-ad, while
@@ -566,6 +584,182 @@ kismet kismet/install-setuid boolean false
 kismet kismet/install-users string
 macchanger macchanger/automatically_run boolean false
 PRESEED
+    fi
+fi
+
+# ------------------------------------------------------------------------------
+# Phase: screenconnect -- ConnectWise Control agent, installed so it actually runs
+# ------------------------------------------------------------------------------
+#
+# Runs early, right after base: it is the way back into a box whose tools phase
+# resolves 3000+ packages over an hour. Losing that install to a dropped session
+# and having no remote access to resume it is the failure this ordering avoids.
+#
+# Opt-in. SCREENCONNECT_URL unset means the phase says so and the run carries on
+# -- an RMM agent is never a reason to redo a deploy.
+#
+# The URL carries session parameters (y=, c=, s=) and this script tees its whole
+# run to /var/log, so the URL is never echoed, never passed through run() (which
+# prints its arguments under --dry-run), and scrubbed out of curl's stderr before
+# anything is printed. Same reasoning as the DOTS_TOKEN handling in the dots
+# phase: a credential in a transcript outlives the run that needed it.
+#
+# Two vendor bugs are worked around here, both verified on Kali:
+#
+#   1. ScreenConnect.ClientSetup.sh takes its RPM branch whenever rpm(1) exists,
+#      which on Debian it may. Debian's rpm defaults %_pkgverify_level to "all"
+#      and ConnectWise's noarch RPMs ship unsigned and without file digests, so
+#      the install dies on "does not verify: no digest". Fetching the .deb the
+#      Control server already builds skips the branch entirely, which is why a
+#      .deb URL is the documented input.
+#
+#   2. The postinstall reports success and leaves a java process that never opens
+#      a relay socket. The init script has no PID file -- its running-check is a
+#      process grep (`ps --ppid "$!" -o comm= | grep java`), so the wedged process
+#      satisfies it and every later start short-circuits with "ScreenConnect is
+#      already started, please stop it first" and does nothing. It survives unit
+#      restarts. Clearing it needs a pkill before the start, not a restart.
+#
+# The check at the end is the established socket to the relay port, NOT the
+# process or the unit state. Both report healthy in exactly the failure above:
+# `systemctl status` shows "active (exited)" (normal for this LSB-wrapped forking
+# unit) and pgrep finds java running. Liveness is not health here.
+
+if should_run screenconnect; then
+    phase "Phase: screenconnect"
+
+    if [[ -z "${SCREENCONNECT_URL:-}" ]]; then
+        msg "SCREENCONNECT_URL not set -- skipping the agent"
+        msg "  set it to a ClientSetup URL from your Control server to install"
+    else
+        # Agent prerequisites. It is Java (not Mono) and shells out to hostname
+        # and xdpyinfo to enumerate displays; xdpyinfo is in x11-utils. Stock
+        # Kali has all three, but a minimal image does not and the failure is a
+        # display-enumeration hang rather than a clear error.
+        apt_install default-jre x11-utils hostname curl
+
+        if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
+            warn "Wayland session detected -- the agent supports X11 only"
+            warn "  pick the i3 session at the greeter, not a Wayland one"
+        fi
+
+        SC_TMP=$(mktemp -d)
+        SC_PKG=""
+
+        # No run() here: it echoes its arguments under --dry-run, and the URL is
+        # the one thing that must not reach the transcript.
+        if (( DRY_RUN )); then
+            echo -e "${YELLOW}[dry-run]${NC} fetch the agent from \$SCREENCONNECT_URL"
+        else
+            case "$SCREENCONNECT_URL" in
+                *.deb*) SC_PKG="$SC_TMP/ScreenConnect.ClientSetup.deb" ;;
+                *)      SC_PKG="$SC_TMP/ScreenConnect.ClientSetup.sh"  ;;
+            esac
+
+            msg "Fetching the agent..."
+            if SC_ERR=$(curl -fsSL --retry 2 -o "$SC_PKG" "$SCREENCONNECT_URL" 2>&1); then
+                msg "  fetched $(basename "$SC_PKG")"
+            else
+                # Scrub the URL out of curl's message before it is printed: -f
+                # usually keeps it out, but a redirect or a proxy error can put
+                # it back, and this goes straight into /var/log.
+                warn "could not fetch the agent: ${SC_ERR//"$SCREENCONNECT_URL"/<SCREENCONNECT_URL>}"
+                SC_PKG=""
+            fi
+        fi
+
+        if [[ -n "$SC_PKG" && -s "$SC_PKG" ]]; then
+            case "$SC_PKG" in
+            *.deb)
+                # The path that avoids bug 1 outright.
+                if dpkg -i "$SC_PKG" >/dev/null 2>&1 \
+                   || apt-get install -y -f >/dev/null 2>&1; then
+                    msg "installed the agent from the .deb"
+                else
+                    warn "dpkg could not install the agent"
+                fi
+                ;;
+            *)
+                # The .sh installer. rpm(1) present means it takes the RPM branch
+                # and hits bug 1, so relax pkgverify for the duration -- and
+                # restore it unconditionally, including on the failure path.
+                # /etc/rpm does not exist on stock Kali, so tee into a missing
+                # directory is itself a silent failure to avoid.
+                SC_RESTORE_RPM=0
+                if command -v rpm &>/dev/null \
+                   && [[ "$(rpm --eval '%_pkgverify_level' 2>/dev/null)" != "none" ]]; then
+                    mkdir -p /etc/rpm
+                    echo '%_pkgverify_level none' > /etc/rpm/macros.pkgverify
+                    SC_RESTORE_RPM=1
+                    msg "relaxed rpm pkgverify for the install (restored after)"
+                fi
+
+                chmod +x "$SC_PKG"
+                bash "$SC_PKG" >/dev/null 2>&1 \
+                    && msg "ran the ClientSetup installer" \
+                    || warn "the ClientSetup installer reported a failure"
+
+                if (( SC_RESTORE_RPM )); then
+                    rm -f /etc/rpm/macros.pkgverify
+                    msg "restored rpm pkgverify"
+                fi
+                ;;
+            esac
+        fi
+
+        rm -rf "$SC_TMP"
+
+        # --- Resolve the instance. Everything downstream is named after it.
+        SC_INSTANCE=""
+        for d in /opt/connectwisecontrol-*; do
+            [[ -d "$d" ]] && { SC_INSTANCE=$(basename "$d"); break; }
+        done
+
+        if (( DRY_RUN )); then
+            echo -e "${YELLOW}[dry-run]${NC} clear the wedged postinstall process and start the agent"
+        elif [[ -z "$SC_INSTANCE" ]]; then
+            warn "no /opt/connectwisecontrol-* -- the agent did not install"
+        else
+            msg "agent instance: $SC_INSTANCE"
+
+            # --- Bug 2. stop leaves the wedged process behind (the init script's
+            # check finds it and short-circuits), so pkill between stop and start
+            # is the part that actually breaks the deadlock. A restart will not.
+            run systemctl stop "$SC_INSTANCE" 2>/dev/null
+            pkill -f com.screenconnect 2>/dev/null \
+                && msg "cleared a wedged agent process"
+            sleep 2
+            run systemctl enable --now "$SC_INSTANCE" 2>/dev/null \
+                || warn "could not enable $SC_INSTANCE"
+
+            # --- Health = an established socket to the relay, nothing weaker.
+            # The port comes from the agent's own launch parameters; 8041 is the
+            # vendor default and the fallback when the file is not readable.
+            SC_PARAMS="/opt/$SC_INSTANCE/ClientLaunchParameters.txt"
+            SC_PORT=$(grep -oP '(?<=p=)[0-9]+' "$SC_PARAMS" 2>/dev/null | head -1)
+            [[ -n "$SC_PORT" ]] || SC_PORT=8041
+
+            msg "waiting for a relay connection on :$SC_PORT..."
+            SC_UP=0
+            for _ in $(seq 1 30); do
+                if ss -tanp 2>/dev/null | grep java | grep -q ":$SC_PORT"; then
+                    SC_UP=1
+                    break
+                fi
+                sleep 2
+            done
+
+            if (( SC_UP )); then
+                msg "agent connected to the relay"
+            else
+                warn "no relay connection after 60s"
+                warn "  the process may be up and wedged -- liveness is not health here"
+                warn "  the agent logs to /var/log/$SC_INSTANCE.log, never journald:"
+                tail -20 "/var/log/$SC_INSTANCE.log" 2>/dev/null \
+                    | sed 's/^/      /' \
+                    || warn "      (no agent log)"
+            fi
+        fi
     fi
 fi
 
@@ -2021,6 +2215,26 @@ if [[ -f "$MACCONF" ]]; then
                   "$MACCONF" 2>/dev/null || echo "unreadable")"
 else
     echo "  MAC: stock (hardware MAC, no cloning)"
+fi
+
+# Remote access. The agent's health is the relay socket -- the process and the
+# unit both report healthy when it is wedged, which is the whole reason this
+# reads ss rather than systemctl.
+SC_SUM=""
+for d in /opt/connectwisecontrol-*; do
+    [[ -d "$d" ]] && { SC_SUM=$(basename "$d"); break; }
+done
+if [[ -n "$SC_SUM" ]]; then
+    echo ""
+    echo "Remote access:"
+    echo "  agent:  $SC_SUM ($(systemctl is-enabled "$SC_SUM" 2>/dev/null || echo "n/a"))"
+    if ss -tanp 2>/dev/null | grep java | grep -qE ':(8041|443)\b'; then
+        echo -e "  relay:  ${GREEN}connected${NC}"
+    else
+        echo -e "  relay:  ${RED}no socket${NC} -- alive but wedged, or not started"
+        echo "          sudo pkill -f com.screenconnect && sudo systemctl start $SC_SUM"
+        echo "          log: /var/log/$SC_SUM.log (not journald)"
+    fi
 fi
 
 # The real hardening deliverable: what is actually listening, right now. Read

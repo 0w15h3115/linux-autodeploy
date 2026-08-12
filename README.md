@@ -49,7 +49,7 @@ Options:
 -h, --help
 ```
 
-Phases: `base tools desktop harden i3 polybar kitty shell dots wordlists`
+Phases: `base screenconnect tools desktop harden i3 polybar kitty shell dots wordlists`
 
 Re-running is always safe — every phase is idempotent, so a run that dies partway
 can be resumed by running it again (or narrowed with `--only`). A full transcript
@@ -116,6 +116,63 @@ If a specific engagement wants a firewall policy, set it deliberately:
 fw-status                   # sudo ufw status verbose
 fw-open 8000/tcp            # sudo ufw allow 8000/tcp
 ```
+
+### The `screenconnect` phase
+
+Installs the ConnectWise Control agent, opt-in via `SCREENCONNECT_URL`. Unset and
+the phase says so and the run carries on — an RMM agent is never a reason to redo
+a deploy.
+
+```bash
+sudo SCREENCONNECT_URL='https://<control-host>/Bin/ScreenConnect.ClientSetup.deb?e=Access&y=Guest&c=...' \
+     ./kali-deploy-physical
+```
+
+It runs **right after `base`**, before the tools phase resolves 3000+ packages —
+so if the session running the deploy drops midway, there's a way back in to
+resume it.
+
+Prefer the `.deb` your Control server builds. `ScreenConnect.ClientSetup.sh` takes
+its RPM branch whenever `rpm(1)` exists, and on Debian that fails: ConnectWise's
+noarch RPMs ship unsigned and without file digests, while Debian's rpm defaults
+`%_pkgverify_level` to `all`, so the install dies on `does not verify: no digest`.
+A `.deb` skips the branch entirely. Given a `.sh` the phase relaxes pkgverify for
+the duration and restores it afterwards, including on the failure path.
+
+The URL carries session parameters (`y=`, `c=`, `s=`), and this script tees its
+whole run to `/var/log`. So the URL is never echoed, never passed through the
+`run()` helper (which prints its arguments under `--dry-run`), and scrubbed out of
+curl's stderr before anything is printed.
+
+**The phase gates success on an established socket to the relay, not on the
+process or the unit.** Both report healthy in the vendor's own failure case: the
+postinstall reports success while leaving a java process that never opens a relay
+socket, and because the init script has no PID file — its running check is
+`ps --ppid "$!" -o comm= | grep java` — the wedged process satisfies it, so every
+later `start` short-circuits with *"ScreenConnect is already started, please stop
+it first"* and does nothing. A `restart` will not clear it; the phase `pkill`s
+between stop and start.
+
+Diagnosing it by hand, the things that produce false negatives:
+
+| Command | Why it lies |
+|---|---|
+| `journalctl -u <unit>` | The agent logs to `/var/log/<unit>.log`, never journald. Always empty. |
+| `systemctl status` → `active (exited)` | Normal for this LSB-wrapped forking unit. Not a failure. |
+| `ss -tnp \| grep -i screenconnect` | `ss` shows the executable name — it's `java`. Grep `java` or `:8041`. |
+| `ss -tnp` with no state flag | Shows ESTAB only. Use `ss -tanp` to catch SYN_SENT. |
+| `find /var/run -name '*.pid'` | `/var/run` is a symlink to `/run`, and `find -P` won't descend into it. There are no PID files anyway. |
+
+```bash
+pgrep -af com.screenconnect          # process alive?
+sudo ss -tanp | grep java            # the real health check
+sudo tail -40 /var/log/connectwisecontrol-<id>.log
+```
+
+For engagement documentation: record the agent's presence, relay host and session
+GUID (all in `/opt/connectwisecontrol-<id>/ClientLaunchParameters.txt`). An
+unexplained RMM agent on an attack box reads exactly like the rogue ScreenConnect
+instances you'd flag in a client environment.
 
 ### The `dots` phase
 
