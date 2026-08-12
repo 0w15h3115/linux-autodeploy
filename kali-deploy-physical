@@ -23,10 +23,23 @@
 #   ufw default-deny inbound, no SSH server, no mDNS/CUPS/Bluetooth
 #   advertisement, NetworkManager MAC randomization, idle screen lock.
 #
+# MAC randomization defaults to `stable`, not `random`. Both hide the hardware
+# MAC; the difference is churn. `random` draws a fresh MAC on every activation,
+# so each reconnect is a new DHCP lease and a new IP -- which tears down any
+# long-lived outbound TCP session on the box. A remote-access agent (we hit this
+# with ConnectWise Control, whose relay socket died on every reconnect) cannot
+# survive that. `stable` derives a MAC per connection profile, so a given
+# network sees the same address every time and the lease persists, while other
+# networks still can't correlate you by hardware MAC. Pass --mac-random for
+# per-activation randomization when you're somewhere that warrants it and
+# nothing on the box needs a durable connection.
+#
 # Usage:
 #   sudo ./kali-deploy-physical [options]
 #
 #   --dry-run          show what would happen; change nothing
+#   --mac-random       per-activation MAC randomization instead of per-network
+#                      (breaks long-lived connections; see above)
 #   --skip <phase>     skip a phase (repeatable)
 #   --only <phase>     run only these phases (repeatable)
 #   --list-phases      print phase names and exit
@@ -259,6 +272,7 @@ readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'
 
 DRY_RUN=0
+MAC_RANDOM=0
 SKIP_PHASES=()
 ONLY_PHASES=()
 
@@ -412,6 +426,7 @@ disable_unit() {
 while (( $# )); do
     case "$1" in
         --dry-run)      DRY_RUN=1; shift ;;
+        --mac-random)   MAC_RANDOM=1; shift ;;
         --skip)         [[ -n "${2:-}" ]] || { err "--skip needs a phase"; exit 1; }
                         SKIP_PHASES+=("$2"); shift 2 ;;
         --only)         [[ -n "${2:-}" ]] || { err "--only needs a phase"; exit 1; }
@@ -662,20 +677,39 @@ if should_run harden; then
 
     # --- MAC randomization. Both the scan-time MAC and the associated MAC, so
     # you aren't trivially trackable across the conference network.
-    msg "Configuring NetworkManager MAC randomization..."
-    write_file /etc/NetworkManager/conf.d/00-macrandomize.conf <<'NMCONF'
+    #
+    # The associated MAC is `stable` unless --mac-random was passed. `random`
+    # re-draws on every activation, so every reconnect is a new DHCP lease and a
+    # new IP, and anything holding a long-lived outbound socket gets dropped --
+    # a remote-access agent on this box will disconnect every time NetworkManager
+    # so much as reconnects. `stable` is a per-profile MAC: the hardware address
+    # still never leaves the machine, and a network you return to sees the same
+    # address, so the lease survives.
+    if (( MAC_RANDOM )); then
+        MAC_MODE="random"
+        MAC_NOTE="fresh MAC per activation -- long-lived connections will drop"
+    else
+        MAC_MODE="stable"
+        MAC_NOTE="per-network MAC -- pass --mac-random for per-activation"
+    fi
+
+    msg "Configuring NetworkManager MAC randomization ($MAC_MODE)..."
+    write_file /etc/NetworkManager/conf.d/00-macrandomize.conf <<NMCONF
 # Managed by kali-deploy-physical -- MAC randomization.
 # scan-rand-mac-address randomizes the MAC used while scanning for networks;
-# cloned-mac-address=random gives a fresh MAC per connection. Delete this file
+# cloned-mac-address hides the hardware MAC when associating. Delete this file
 # to restore stock behaviour (some captive portals and MAC-allowlisted networks
 # will need you to).
+#
+# Mode here is "$MAC_MODE": $MAC_NOTE.
 [device]
 wifi.scan-rand-mac-address=yes
 
 [connection]
-wifi.cloned-mac-address=random
-ethernet.cloned-mac-address=random
+wifi.cloned-mac-address=$MAC_MODE
+ethernet.cloned-mac-address=$MAC_MODE
 NMCONF
+    msg "  $MAC_NOTE"
     run systemctl reload NetworkManager 2>/dev/null \
         || warn "could not reload NetworkManager (applies on next start)"
 
@@ -1879,6 +1913,18 @@ for u in ssh avahi-daemon cups bluetooth; do
     state=$(systemctl is-enabled "$u" 2>/dev/null || echo "n/a")
     echo "  $u: $state"
 done
+
+# Read the MAC mode back off disk rather than echoing $MAC_MODE: the summary
+# runs even when the harden phase was skipped, and what's on disk is what
+# NetworkManager will act on. `random` here is the first thing to check if a
+# long-lived connection on this box keeps dropping.
+NMCONF_PATH="/etc/NetworkManager/conf.d/00-macrandomize.conf"
+if [[ -f "$NMCONF_PATH" ]]; then
+    echo "  MAC: $(awk -F= '/^ethernet.cloned-mac-address/ {print $2}' \
+                  "$NMCONF_PATH" 2>/dev/null || echo "unreadable")"
+else
+    echo "  MAC: stock (no $NMCONF_PATH)"
+fi
 
 # The real hardening deliverable: what is actually listening, right now. Read
 # this rather than trusting the toggles above.

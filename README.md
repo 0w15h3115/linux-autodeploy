@@ -87,7 +87,9 @@ Aimed at a laptop that is physically with you on an untrusted LAN, not a remote 
 - no SSH server (disabled and masked if present)
 - `avahi-daemon` and `cups`/`cups-browsed` off — no mDNS or printer advertisement
 - `bluetooth.service` off (the BT *tools* are still installed)
-- NetworkManager MAC randomization, scan-time and per-connection
+- NetworkManager MAC randomization: scan-time, plus a per-network (`stable`)
+  associated MAC. `--mac-random` makes the associated MAC per-*activation*
+  instead — see the caveat below before you reach for it.
 - screen locks after 5 minutes idle via `xss-lock`
 
 The verification pass ends with an `ss -tulpn` listing of everything actually
@@ -157,6 +159,12 @@ end rather than claiming they passed:
    `Mod+Escape` lock.
 4. If a captive portal or MAC-allowlisted network rejects you, MAC randomization is
    why — `sudo rm /etc/NetworkManager/conf.d/00-macrandomize.conf`.
+   Likewise if a remote-access agent (ConnectWise Control, Tailscale, an SSH
+   reverse tunnel) keeps dropping with "the network connection has been
+   disconnected": check the `MAC:` line in the verification summary. `random`
+   means a new MAC — and so a new DHCP lease and IP — on every reconnect, which
+   tears down any long-lived outbound socket. The default is `stable` for this
+   reason; you only get `random` by passing `--mac-random`.
 5. Verify monitor mode before relying on it: `sudo airmon-ng start wlan0`.
 
 ### Shell
