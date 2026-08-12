@@ -15,9 +15,14 @@ pentest tooling over Tor.
 | Script | Target | Desktop | Access |
 |---|---|---|---|
 | **`kali-deploy-physical`** | Physical laptop or VM you sit at | i3 + polybar + kitty | local console, plus sshd |
+| **`kali-deploy-vm`** | Hyper-V guest, when you want *only* the desktop | i3 + polybar + kitty, no compositor | ScreenConnect / ConnectWise Control agent |
 | **`kali-deploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
 | **`kali-deploy-remote`** *(on WSL)* | Kali under WSL2 — same script, detected | none | none; the access layer is skipped |
 | **`test-with-tails`** *(beta)* | Tails OS live session | Tails' own GNOME | everything over Tor; nothing persists |
+
+`kali-deploy-vm` is configuration only — it installs **no tools**, on the basis that
+a stock Kali image already ships `kali-linux-default`. Use `kali-deploy-physical`
+if you want the `kali-tools-*` metapackage set.
 
 Superseded Ubuntu scripts live in [`archive/`](archive/). `SPEC.md` covers the
 design reasoning behind the two Kali scripts.
@@ -266,6 +271,132 @@ that leaves you in whatever directory you quit from. Oh My Zsh is deliberately *
 installed — Kali already ships syntax highlighting and autosuggestions, and OMZ only
 adds startup cost. To remove, delete the block between the `kali-deploy-physical`
 markers in `~/.zshrc`.
+
+---
+
+## kali-deploy-vm
+
+For Kali as a Hyper-V guest that you reach with a remote-desktop agent instead of
+sitting at it. Configuration only — no tools, no firewall, no dotfiles.
+
+```bash
+sudo ./kali-deploy-vm
+sudo SC_URL='https://<you>.screenconnect.com/Bin/ConnectWiseControl.ClientSetup.deb?e=Access&y=Guest&t=' \
+     ./kali-deploy-vm --only screenconnect
+```
+
+Phases: `base hyperv desktop i3 polybar kitty shell screenconnect`
+
+Options are the same grammar as the other two, plus `--autologin` and
+`--compositor <xrender|glx|egl>`.
+
+### How this differs from kali-deploy-physical
+
+`kali-deploy-physical` now handles a VM too: `owl-picom` picks a working backend
+at runtime, and it has its own `screenconnect` phase. **If you want the tools,
+use that one** — this script installs none, and that is the main reason to choose
+between them rather than any of the differences below.
+
+What remains distinct here:
+
+**No compositor at all**, rather than one that picks its backend. `owl-picom`
+tries xrender first on a VM, which is the right call — but it still tries glx
+second if xrender fails, and a failed glx attempt is what leaves an opaque
+composite overlay window that eats input. On a box reached by screen-scraping,
+compositing buys nothing you can see and costs bandwidth on every frame, so the
+safe default here is none. `--compositor xrender` opts back in.
+
+**No idle lock, no DPMS blanking.** On a remote box a blanked screen is
+indistinguishable from a hung one, and an idle lock you didn't ask for means
+typing a password down a laggy link to get back into a session you never left.
+`$mod+Escape` still locks manually.
+
+**No idle lock, no DPMS blanking.** On a remote box a blanked screen is
+indistinguishable from a hung one, and an idle lock you didn't ask for means
+typing a password down a laggy link to get back into a session you never left.
+`$mod+Escape` still locks manually.
+
+**Nothing that assumes hardware.** The battery module, the wireless module and
+the backlight keys are emitted only if `/sys` says the hardware is there — so the
+bar has no permanently-blank `BAT0` and no permanent "wlan down". These are
+probed, not assumed, so the script is still correct on bare metal.
+
+Two smaller ones that matter in practice: `sync_to_monitor no` in `kitty.conf`
+(vsync against a display that isn't real is what makes kitty paint late or appear
+to hang on software rendering), and `$mod+Shift+Return` bound to **xterm** as a
+fallback, because kitty wants OpenGL 3.3 and a tiling WM whose only terminal
+binding is broken is a box you can't use.
+
+### The screenconnect phase
+
+**It asks you for the URL.** Run the script with nothing set and the phase prompts:
+
+```
+[+] The ScreenConnect agent needs the installer URL from your instance.
+[+]   Access -> Build Installer -> Linux -> copy the .deb link.
+[+]   Paste it below, or press Enter alone to skip this phase.
+
+  URL: 
+[+] got a URL for https://acme.screenconnect.com (parameters hidden)
+```
+
+The paste is read silently and confirmed back **by host only**. The URL carries
+session parameters (`y=`, `c=`, `s=`) and the script tees its whole run to
+`/var/log`, so it's never echoed, never passed through the `run()` helper (which
+prints its arguments under `--dry-run`), and scrubbed out of curl's stderr before
+any error is printed.
+
+The prompt appears **only when stdin is a terminal** and not under `--dry-run`.
+SPEC.md rules out interactive prompts because a prompt that hangs an unattended
+run is the exact failure the whole spec exists to avoid — so from cron, a pipe, or
+CI this falls straight through to the skip path instead of waiting. Pre-supply it
+to skip the question entirely:
+
+| Variable | Meaning |
+|---|---|
+| `SCREENCONNECT_URL` | ClientSetup URL from **Access → Build Installer → Linux** |
+| `SCREENCONNECT_DEB` | path to an already-downloaded `.deb`; takes precedence |
+
+Same variable names `kali-deploy-physical` uses, so a box that gets one script can
+be handed the other unchanged.
+
+Press Enter alone and the phase **skips and prints what to do** — it is never a
+reason for the run to fail, and the desktop is already up by the time it runs.
+
+The phase installs the X libraries the agent links against before the `.deb`,
+because a missing one produces an agent that installs cleanly, starts cleanly, and
+shows you a black rectangle. `libicu` is resolved dynamically since its version
+suffix moves with every Debian import.
+
+Note `kali-deploy-physical`'s own screenconnect phase handles two vendor install
+bugs this one doesn't — the unsigned-RPM path taken by `ClientSetup.sh` on Debian,
+and pkgverify relaxation. This phase takes the `.deb` only. Prefer the `.deb` your
+Control server builds either way.
+
+### Autologin
+
+Off by default. With a greeter, a box that reboots comes back to a locked login
+screen the agent can still show you — you lose a password prompt. With
+`--autologin` it comes back to an unlocked desktop holding your keys, your loot and
+your shell history, reachable by anyone who reaches the agent. It's offered because
+some agent configurations only attach to an active user session, but it isn't a
+choice to make on someone's behalf.
+
+### Resolution
+
+Host-side on a Gen 2 VM — the guest's `hyperv_drm` takes its mode from the host and
+`xrandr` can't add modes it was never offered. From an elevated PowerShell prompt,
+VM powered off:
+
+```powershell
+Set-VMVideo -VMName <name> -HorizontalResolution 1920 -VerticalResolution 1080 -ResolutionType Single
+```
+
+### If you land in a black screen anyway
+
+`Ctrl+Alt+F3` for a TTY, log in, `unstick` (aliased by the `shell` phase — it's
+`pkill picom; i3-msg restart`), then `Ctrl+Alt+F7`. That path works regardless of
+what's on the display, so you're never actually locked out.
 
 ---
 

@@ -14,6 +14,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHYSICAL="kali-deploy-physical"      # scripts under test, repo-relative
 REMOTE="kali-deploy-remote"
+VM="kali-deploy-vm"                  # static analysis only; see CHECK_FILES
 TAILS="test-with-tails"              # static analysis only; see CHECK_FILES
 IMAGE="kalilinux/kali-rolling:latest"
 STATIC_ONLY=0
@@ -33,9 +34,17 @@ head_ "Static analysis (host)"
 # written to avoid. $TAILS is checked here but not in the container suite:
 # Tails has no container image, and its install path needs Tor and the live
 # session's amnesia user.
+#
+# $VM is static-only for a related reason: its phases branch on
+# systemd-detect-virt reporting "microsoft" and on /sys probes for a battery,
+# a backlight and a wireless device. A container reports none of those, so the
+# hyperv phase would no-op and the config phases would be exercised on exactly
+# one branch of the three they were written to choose between -- a green tick
+# that proves nothing about the platform the script exists for.
 CHECK_FILES=(
     "$PHYSICAL"
     "$REMOTE"
+    "$VM"
     "$TAILS"
     tests/run-tests.sh
     tests/container-tests.sh
