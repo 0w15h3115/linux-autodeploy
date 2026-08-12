@@ -14,7 +14,7 @@ pentest tooling over Tor.
 
 | Script | Target | Desktop | Access |
 |---|---|---|---|
-| **`kali-deploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty | local only; hardened for a hostile LAN |
+| **`kali-deploy-physical`** | Physical laptop or VM you sit at | i3 + polybar + kitty | local console, plus sshd |
 | **`kali-deploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
 | **`kali-deploy-remote`** *(on WSL)* | Kali under WSL2 — same script, detected | none | none; the access layer is skipped |
 | **`test-with-tails`** *(beta)* | Tails OS live session | Tails' own GNOME | everything over Tor; nothing persists |
@@ -26,8 +26,8 @@ design reasoning behind the two Kali scripts.
 
 ## kali-deploy-physical
 
-A Kali-first deploy for a laptop you carry: the full tool set, the i3 desktop, and
-hardening aimed at a conference network.
+A Kali-first deploy for a box you sit at, physical or virtual: the full tool set,
+the i3 desktop, and a hardening phase kept deliberately out of the tooling's way.
 
 ```bash
 sudo ./kali-deploy-physical
@@ -37,6 +37,9 @@ Options:
 
 ```
 --dry-run          show what would happen; change nothing
+--mac-stable       clone a per-network MAC (off by default)
+--mac-random       clone a fresh MAC per activation (off by default;
+                   breaks long-lived connections)
 --skip <phase>     skip a phase (repeatable)
 --only <phase>     run only these phases (repeatable)
 --list-phases      print phase names
@@ -81,25 +84,37 @@ want to borrow from them.
 
 ### Hardening
 
-Aimed at a laptop that is physically with you on an untrusted LAN, not a remote host:
+Deliberately thin. This is a pentest box, and the controls a general-purpose
+baseline applies are the same ones that break the tooling installed alongside
+them — so the phase does less than its name suggests, on purpose.
 
-- `ufw` default-deny inbound, enabled
-- no SSH server (disabled and masked if present)
-- `avahi-daemon` and `cups`/`cups-browsed` off — no mDNS or printer advertisement
-- `bluetooth.service` off (the BT *tools* are still installed)
-- NetworkManager MAC randomization: scan-time, plus a per-network (`stable`)
-  associated MAC. Skipped on a VM — see the caveat below. `--mac-random` makes
-  the associated MAC per-*activation* and applies it on a VM too.
-- screen locks after 5 minutes idle via `xss-lock`
+- **`ufw` is not enabled**, and an earlier run's enabled state is undone. A
+  default-deny inbound policy lets every listener here — Responder, `ntlmrelayx`,
+  a msfconsole handler, `impacket-smbserver`, `python3 -m http.server` — bind
+  successfully and then catch nothing. That failure gets debugged from the target
+  end, mid-engagement, long after anyone remembers a firewall is involved.
+- **`sshd` is left running.** The box is reached remotely, and a remote-access
+  agent depending on X, the display manager and a vendor relay is a single point
+  of failure; sshd is the way back in, and the pivot path besides.
+- **`bluetooth.service` is left running** — the BT tools this script installs
+  drive `bluetoothd`, so disabling it disabled the tooling.
+- `avahi-daemon` and `cups`/`cups-browsed` **off**. This one is a port-conflict
+  fix rather than hardening: avahi holds UDP 5353 and cups holds 631, and
+  Responder needs 5353 free to poison mDNS. It binds what it can and stays quiet
+  about the rest, so the symptom is a capture that never happens.
+- **MAC cloning off** unless asked for — `--mac-stable` for a per-network MAC,
+  `--mac-random` for a fresh one per activation. See the caveat below.
+- **No idle screen lock.** `Mod+Escape` locks on demand and `xss-lock` still
+  locks on suspend; there is no timeout to come back to mid-job.
 
 The verification pass ends with an `ss -tulpn` listing of everything actually
 listening. Read that rather than trusting the toggles.
 
-**Inbound is default-deny**, so Responder, mitm6, or a `python3 -m http.server` will
-not be reachable from the LAN until you open the port:
+If a specific engagement wants a firewall policy, set it deliberately:
 
 ```bash
-sudo ufw allow 8000/tcp     # or the fw-open alias
+fw-status                   # sudo ufw status verbose
+fw-open 8000/tcp            # sudo ufw allow 8000/tcp
 ```
 
 ### The `dots` phase
@@ -157,23 +172,25 @@ end rather than claiming they passed:
 2. Confirm polybar renders and the battery module finds `BAT0`.
 3. Mod is the **Windows/Super** key. `Mod+Return` kitty, `Mod+d` dmenu,
    `Mod+Escape` lock.
-4. If a captive portal or MAC-allowlisted network rejects you, MAC randomization is
-   why — `sudo rm /etc/NetworkManager/conf.d/00-macrandomize.conf`.
-   Likewise if a remote-access agent (ConnectWise Control, Tailscale, an SSH
-   reverse tunnel) keeps dropping with "the network connection has been
-   disconnected": check the `MAC:` line in the verification summary. `random`
-   means a new MAC — and so a new DHCP lease and IP — on every reconnect, which
-   tears down any long-lived outbound socket. The default is `stable` for this
-   reason; you only get `random` by passing `--mac-random`.
+4. MAC cloning is off unless you passed `--mac-stable` or `--mac-random`; the
+   `MAC:` line in the verification summary says which. If you did enable it and a
+   captive portal or MAC-allowlisted network rejects you, that's why —
+   `sudo rm /etc/NetworkManager/conf.d/00-macrandomize.conf`.
 
-   On a **VM this is skipped entirely**, and an earlier run's config is removed.
-   A hypervisor's vSwitch forwards only frames whose source MAC it assigned to
-   the vNIC. Hyper-V exposes this as *Settings → Network Adapter → Advanced
-   Features → Enable MAC address spoofing*, **off by default**, and with it off
-   any cloned MAC — `stable` or `random`, the switch doesn't distinguish — gets
-   the guest's traffic dropped, and it stays dropped across reboots because each
-   boot re-applies it. If a VM deployed by an older version of this script has no
-   network, that's the first thing to check:
+   `--mac-random` additionally breaks anything holding a long-lived outbound
+   socket: a fresh MAC per activation means a new DHCP lease and a new IP on
+   every reconnect, so a remote-access agent (ConnectWise Control, Tailscale, an
+   SSH reverse tunnel) drops with "the network connection has been disconnected".
+   `--mac-stable` keeps a per-network address, so the lease survives.
+
+   **On a VM neither is safe without host cooperation.** A hypervisor's vSwitch
+   forwards only frames whose source MAC it assigned to the vNIC. Hyper-V exposes
+   this as *Settings → Network Adapter → Advanced Features → Enable MAC address
+   spoofing*, **off by default**, and with it off any cloned MAC — stable or
+   random, the switch doesn't distinguish — gets the guest's traffic dropped, and
+   it stays dropped across reboots because each boot re-applies it. If a VM
+   deployed by an older version of this script has no network, that's the first
+   thing to check:
 
    ```bash
    ip link show                        # active MAC vs. the one Hyper-V assigned

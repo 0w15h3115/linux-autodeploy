@@ -19,35 +19,38 @@
 # dialog for them on every session start -- see the phase for why this is a
 # derived copy and not an edit or a fresh config.
 #
-# Hardening (laptop on a hostile LAN -- see Phase 4):
-#   ufw default-deny inbound, no SSH server, no mDNS/CUPS/Bluetooth
-#   advertisement, NetworkManager MAC randomization, idle screen lock.
+# Hardening (Phase 4) is deliberately thin. This is a pentest box: a
+# default-deny inbound firewall silently eats every reverse shell and every
+# Responder capture, MAC cloning gets a VM's traffic dropped by the vSwitch, and
+# disabling bluetoothd disables the BT tooling with it. So the phase leaves sshd
+# and bluetoothd running, makes sure ufw is NOT default-deny (disabling it if an
+# earlier run turned it on), and turns avahi/cups off -- that last one for the
+# port conflict, since Responder needs UDP 5353 free, rather than for hardening.
 #
-# MAC randomization defaults to `stable`, not `random`. Both hide the hardware
-# MAC; the difference is churn. `random` draws a fresh MAC on every activation,
-# so each reconnect is a new DHCP lease and a new IP -- which tears down any
-# long-lived outbound TCP session on the box. A remote-access agent (we hit this
-# with ConnectWise Control, whose relay socket died on every reconnect) cannot
-# survive that. `stable` derives a MAC per connection profile, so a given
-# network sees the same address every time and the lease persists, while other
-# networks still can't correlate you by hardware MAC. Pass --mac-random for
-# per-activation randomization when you're somewhere that warrants it and
-# nothing on the box needs a durable connection.
+# MAC cloning is off unless asked for:
+#   --mac-stable   a per-connection-profile MAC. A given network sees the same
+#                  address every time, so the DHCP lease survives a reconnect.
+#   --mac-random   a fresh MAC per activation. Every reconnect is a new lease
+#                  and a new IP, tearing down any long-lived outbound TCP
+#                  session on the box -- this shipped as the default once, and
+#                  it is why the ScreenConnect relay kept dying with "the
+#                  network connection has been disconnected".
 #
-# On a VM the whole thing is skipped, and an earlier run's config is removed.
-# A hypervisor's virtual switch forwards only frames whose source MAC it handed
-# out -- Hyper-V calls this "Enable MAC address spoofing" and ships it off -- so
-# any cloned MAC blackholes the guest, stable or random alike, and stays that way
-# across reboots. The hostile-LAN threat it defends against also isn't the one a
-# VM you reach over a remote session is facing. --mac-random forces it anyway,
-# for a host that does permit spoofing.
+# Neither is safe unguarded on a VM. A hypervisor's virtual switch forwards only
+# frames whose source MAC it handed out -- Hyper-V calls this "Enable MAC
+# address spoofing" and ships it off -- so any cloned MAC blackholes the guest,
+# stable and random alike, and stays that way across reboots because every boot
+# re-applies it. Both flags warn before doing it. Re-running without them
+# removes a config an earlier run left behind, which is the fix for a box
+# already in that state.
 #
 # Usage:
 #   sudo ./kali-deploy-physical [options]
 #
 #   --dry-run          show what would happen; change nothing
-#   --mac-random       per-activation MAC randomization instead of per-network,
-#                      and applies it on a VM too (see the caveats above)
+#   --mac-stable       clone a per-network MAC (off by default)
+#   --mac-random       clone a fresh MAC per activation (off by default;
+#                      breaks long-lived connections -- see above)
 #   --skip <phase>     skip a phase (repeatable)
 #   --only <phase>     run only these phases (repeatable)
 #   --list-phases      print phase names and exit
@@ -281,6 +284,7 @@ readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'
 
 DRY_RUN=0
+MAC_STABLE=0
 MAC_RANDOM=0
 SKIP_PHASES=()
 ONLY_PHASES=()
@@ -435,6 +439,7 @@ disable_unit() {
 while (( $# )); do
     case "$1" in
         --dry-run)      DRY_RUN=1; shift ;;
+        --mac-stable)   MAC_STABLE=1; shift ;;
         --mac-random)   MAC_RANDOM=1; shift ;;
         --skip)         [[ -n "${2:-}" ]] || { err "--skip needs a phase"; exit 1; }
                         SKIP_PHASES+=("$2"); shift 2 ;;
@@ -664,91 +669,106 @@ if should_run desktop; then
 fi
 
 # ------------------------------------------------------------------------------
-# Phase: harden -- posture for a laptop on a hostile LAN
+# Phase: harden -- keep the box quiet without getting in the tooling's way
 # ------------------------------------------------------------------------------
+#
+# This is a pentest box, so "hardening" here is deliberately thin. The controls
+# a general-purpose baseline would apply are the same ones that break the tools
+# this script exists to install: a default-deny inbound firewall silently eats
+# every reverse shell and every Responder capture, MAC cloning gets a VM's
+# traffic dropped by the vSwitch, and disabling bluetoothd disables the BT
+# tooling along with it. An engagement lost to a control nobody asked for is a
+# worse outcome than a slightly noisier laptop.
+#
+# What survives is the part that is operationally useful anyway -- see below --
+# plus opt-in flags for the rest.
 
 if should_run harden; then
     phase "Phase: harden"
 
-    # --- No listening SSH. This laptop is one you sit at; an SSH server on the
-    # DEFCON network is an attack surface with no upside.
-    disable_unit ssh.service "no SSH server on a laptop"
-
-    # --- Stop advertising ourselves. avahi broadcasts hostname and services
-    # over mDNS; cups-browsed both listens and browses for printers.
-    disable_unit avahi-daemon.service "mDNS advertises this host"
-    disable_unit avahi-daemon.socket  "mDNS advertises this host"
-    disable_unit cups.service         "printing daemon listens"
+    # --- avahi and cups off. This is a port-conflict fix, not hardening:
+    # avahi-daemon holds UDP 5353 and cups holds 631, and Responder needs 5353
+    # free to poison mDNS. It binds what it can and stays quiet about the rest,
+    # so the failure is a capture that never happens rather than an error. Both
+    # daemons also advertise the host on a network where that is unhelpful,
+    # which is the reason they were originally listed here.
+    disable_unit avahi-daemon.service "frees UDP 5353 for Responder"
+    disable_unit avahi-daemon.socket  "frees UDP 5353 for Responder"
+    disable_unit cups.service         "frees 631, and stops printer chatter"
     disable_unit cups-browsed.service "printer discovery"
 
-    # --- Bluetooth tools stay installed; the daemon needn't be discoverable.
-    disable_unit bluetooth.service "BT tools installed, daemon off by default"
+    # --- sshd and bluetoothd are deliberately left alone.
+    #
+    # sshd: this box is reached remotely, and a remote-access agent that depends
+    # on X, the display manager and a vendor relay is a single point of failure.
+    # sshd is the way back in when that breaks, and it is the pivot/forwarding
+    # path during an engagement besides.
+    #
+    # bluetoothd: the BT tools this script installs drive it. Disabling the
+    # daemon while installing the tooling meant the tooling did not work.
 
-    # --- MAC randomization. Both the scan-time MAC and the associated MAC, so
-    # you aren't trivially trackable across the conference network.
+    # --- MAC cloning. Off unless asked for.
     #
-    # The associated MAC is `stable` unless --mac-random was passed. `random`
-    # re-draws on every activation, so every reconnect is a new DHCP lease and a
-    # new IP, and anything holding a long-lived outbound socket gets dropped --
-    # a remote-access agent on this box will disconnect every time NetworkManager
-    # so much as reconnects. `stable` is a per-profile MAC: the hardware address
-    # still never leaves the machine, and a network you return to sees the same
-    # address, so the lease survives.
+    # --mac-stable  clones a per-connection-profile MAC: a given network sees
+    #               the same address every time, so the DHCP lease persists.
+    # --mac-random  re-draws on every activation. Every reconnect is a new lease
+    #               and a new IP, which tears down any long-lived outbound TCP
+    #               session -- a remote-access agent on this box will drop each
+    #               time NetworkManager reconnects. This is what shipped by
+    #               default once, and it is why the ScreenConnect relay kept
+    #               dying with "the network connection has been disconnected".
     #
-    # Skipped entirely on a VM. A hypervisor's virtual switch generally forwards
-    # only frames whose source MAC is the one it handed the vNIC: on Hyper-V that
-    # is the "Enable MAC address spoofing" checkbox under the adapter's Advanced
-    # Features, and it is off by default. With it off, a cloned MAC -- stable or
-    # random, the switch doesn't care which -- gets the guest's traffic dropped
-    # on the floor, and it stays dropped across reboots because every boot
-    # re-applies it. The threat this setting answers is a laptop associating to a
-    # hostile LAN; a VM reached over a remote session isn't facing it.
-    #
-    # --mac-random still overrides, for a host that does have spoofing enabled.
+    # Neither is safe unguarded on a VM: a hypervisor's virtual switch forwards
+    # only frames whose source MAC it assigned to the vNIC. Hyper-V exposes that
+    # as "Enable MAC address spoofing" on the adapter's Advanced Features and
+    # ships it off, and with it off a cloned MAC blackholes the guest, stable
+    # and random alike, and stays that way across reboots because every boot
+    # re-applies it. The flags still work there; they just warn first.
     if systemd-detect-virt --quiet 2>/dev/null; then
         MAC_VIRT=$(systemd-detect-virt 2>/dev/null) || MAC_VIRT="a hypervisor"
     else
         MAC_VIRT=""
     fi
 
-    if [[ -n "$MAC_VIRT" ]] && (( ! MAC_RANDOM )); then
-        msg "Skipping MAC randomization ($MAC_VIRT guest)"
-        msg "  a cloned MAC is dropped by the vSwitch unless the host allows spoofing"
-        msg "  pass --mac-random to force it anyway"
+    MAC_MODE=""
+    (( MAC_STABLE )) && MAC_MODE="stable"
+    (( MAC_RANDOM )) && MAC_MODE="random"
 
-        # Remove rather than merely skip. A box deployed by an earlier run still
-        # has the file, and that file is why its network is down -- re-running
-        # the script is the documented way to fix a box, so it has to undo this.
+    if [[ -z "$MAC_MODE" ]]; then
+        # Remove rather than merely decline to write. A box deployed by an
+        # earlier version still has this file, and on a VM that file is why its
+        # network is down. Re-running the script is the documented way to fix a
+        # box, so it has to undo what an earlier run did.
         if [[ -f "$MACCONF" ]]; then
             if run rm -f "$MACCONF"; then
-                msg "  removed $MACCONF left by an earlier run"
+                msg "removed $MACCONF left by an earlier run"
                 run systemctl reload NetworkManager 2>/dev/null \
                     || warn "could not reload NetworkManager (applies on next start)"
             else
                 warn "could not remove $MACCONF"
             fi
+        else
+            msg "MAC cloning off (--mac-stable / --mac-random to enable)"
         fi
     else
-        if (( MAC_RANDOM )); then
-            MAC_MODE="random"
+        if [[ "$MAC_MODE" == "random" ]]; then
             MAC_NOTE="fresh MAC per activation -- long-lived connections will drop"
         else
-            MAC_MODE="stable"
-            MAC_NOTE="per-network MAC -- pass --mac-random for per-activation"
+            MAC_NOTE="per-network MAC -- the DHCP lease survives a reconnect"
         fi
 
         if [[ -n "$MAC_VIRT" ]]; then
-            warn "forcing MAC randomization on a $MAC_VIRT guest"
+            warn "MAC cloning requested on a $MAC_VIRT guest"
             warn "  the host must have MAC spoofing enabled or this box loses the network"
         fi
 
-        msg "Configuring NetworkManager MAC randomization ($MAC_MODE)..."
+        msg "Configuring NetworkManager MAC cloning ($MAC_MODE)..."
         write_file "$MACCONF" <<NMCONF
-# Managed by kali-deploy-physical -- MAC randomization.
+# Managed by kali-deploy-physical -- MAC cloning (opt-in).
 # scan-rand-mac-address randomizes the MAC used while scanning for networks;
 # cloned-mac-address hides the hardware MAC when associating. Delete this file
-# to restore stock behaviour (some captive portals and MAC-allowlisted networks
-# will need you to).
+# to restore stock behaviour (captive portals, MAC-allowlisted networks and
+# hypervisors that don't permit MAC spoofing will all need you to).
 #
 # Mode here is "$MAC_MODE": $MAC_NOTE.
 [device]
@@ -763,14 +783,32 @@ NMCONF
             || warn "could not reload NetworkManager (applies on next start)"
     fi
 
-    # --- Firewall. Default-deny inbound. No lockout risk: you have the keyboard.
+    # --- Firewall. Explicitly NOT default-deny inbound.
+    #
+    # This is the control that cost the most. Half the toolset here is a
+    # listener: msfconsole handlers and nc catchers, Responder on 445/139/80/
+    # 443/5355, ntlmrelayx, impacket-smbserver, a python http.server delivering
+    # a payload. Every one of them binds successfully behind a default-deny
+    # policy and then catches nothing, which is a failure you debug from the
+    # target end, mid-engagement, having forgotten the firewall exists.
+    #
+    # An earlier run enabled ufw, so leaving it alone is not enough -- a
+    # re-deploy has to put the box back. ufw stays installed; `fw-open` and
+    # `fw-status` (see the shell phase) are there when a specific engagement
+    # wants a policy, and that is a decision to make deliberately rather than
+    # one to inherit from a deploy script.
     if command -v ufw &>/dev/null; then
-        msg "Configuring ufw (default-deny inbound)..."
-        run ufw default deny incoming  || warn "ufw: could not set default deny incoming"
-        run ufw default allow outgoing || warn "ufw: could not set default allow outgoing"
-        run ufw --force enable         || warn "ufw: could not enable"
-    else
-        warn "ufw not installed -- skipping firewall"
+        if ufw status 2>/dev/null | grep -q "Status: active"; then
+            if run ufw --force disable; then
+                # Not "disabled ..." -- tests/ T6 greps for that wording to catch
+                # the phase claiming it disabled a systemd unit it never touched.
+                msg "turned ufw off (default-deny inbound breaks listeners)"
+            else
+                warn "ufw: could not disable"
+            fi
+        else
+            msg "ufw inactive -- left that way (see fw-open/fw-status)"
+        fi
     fi
 fi
 
@@ -1005,8 +1043,16 @@ bindsym XF86AudioLowerVolume exec --no-startup-id wpctl set-volume -l 1.0 @DEFAU
 bindsym XF86AudioMute        exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
 bindsym XF86AudioMicMute     exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
 
-# Lock screen -- manual, and automatically after 5 min idle. On a conference
-# floor an unattended unlocked laptop is the whole threat model.
+# Lock screen -- manual, plus on suspend. No idle timeout.
+#
+# It used to lock after 5 minutes idle (`xset s 300 300`). On a box reached over
+# a remote session that mostly means coming back to a lock screen in the middle
+# of an engagement, and a long-running job you were watching is behind it. The
+# threat it answered -- an unattended unlocked laptop on a conference floor --
+# isn't the one a VM faces. `xset s off` kills the idle timer.
+#
+# xss-lock stays: with no screensaver timeout it only fires on suspend, which is
+# worth keeping and costs nothing during normal work.
 #
 # betterlockscreen wraps i3lock-color: it caches a scaled copy of the lock image
 # per resolution and passes the styling from ~/.config/betterlockscreenrc, which
@@ -1029,7 +1075,7 @@ exec --no-startup-id [ -d $HOME/.cache/betterlockscreen ] || \
 
 bindsym $mod+Escape exec --no-startup-id owl-lock
 exec --no-startup-id xss-lock --transfer-sleep-lock -- owl-lock
-exec --no-startup-id xset s 300 300
+exec --no-startup-id xset s off
 I3CONFIG
 
     run chown -R "$REAL_USER:$REAL_USER" "$I3_DIR"
@@ -1959,6 +2005,8 @@ echo "Hardening:"
 if command -v ufw &>/dev/null; then
     echo "  ufw: $(ufw status 2>/dev/null | head -1)"
 fi
+# ssh and bluetooth are listed because this phase deliberately leaves them
+# running: seeing them enabled here is the expected result, not a finding.
 for u in ssh avahi-daemon cups bluetooth; do
     state=$(systemctl is-enabled "$u" 2>/dev/null || echo "n/a")
     echo "  $u: $state"
@@ -2012,15 +2060,20 @@ cat <<BANNER
        If it is not running, start it by hand and read the error (a driver with
        no usable GLX backend is the usual one, and 'picom --backend xrender'
        is the fallback).
-    5. Screen auto-locks after 5 minutes idle (xss-lock).
-    6. MAC randomization is on. If a captive portal or a MAC-allowlisted
-       network refuses you, that is why:
-           sudo rm /etc/NetworkManager/conf.d/00-macrandomize.conf
-    7. Check monitor mode on your wireless adapter before you rely on it:
+    5. Mod+Escape locks the screen. There is no idle timeout -- it locks on
+       suspend and when you ask, and never in the middle of a job.
+    6. Check monitor mode on your wireless adapter before you rely on it:
            sudo airmon-ng start wlan0
 
-  Inbound is default-deny. To expose a listener (Responder, mitm6, a
-  python http.server) you must open it:
-           sudo ufw allow 8000/tcp        # or: fw-open 8000/tcp
+  ufw is NOT enabled, on purpose: a default-deny inbound policy lets every
+  listener here (Responder, ntlmrelayx, a msfconsole handler, a python
+  http.server) bind and then catch nothing. If an engagement wants a policy,
+  set it deliberately -- fw-status shows where you stand, fw-open adds a rule.
+
+  MAC cloning is off by default. --mac-stable gives a per-network MAC;
+  --mac-random gives a fresh one per activation, which drops any long-lived
+  connection -- including a remote-access agent's -- on every reconnect.
+  On a VM, either one needs MAC spoofing enabled on the hypervisor's vSwitch
+  or the guest loses the network entirely.
 
 BANNER

@@ -721,6 +721,61 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+head_ "T6b: the harden phase stays out of the tooling's way"
+# A general-purpose baseline breaks the tools this script installs. These assert
+# the specific controls that cost us an engagement's worth of debugging: a
+# default-deny firewall that eats every listener, and MAC cloning that a
+# hypervisor's vSwitch drops. Each one regressed from a plausible-looking edit,
+# so they are pinned here rather than left to the reviewer.
+# ------------------------------------------------------------------------------
+MACCONF_T=/etc/NetworkManager/conf.d/00-macrandomize.conf
+
+rm -f "$MACCONF_T"
+as_sudo --only harden >/tmp/harden2.log 2>&1
+
+# ufw must never be left enabled: Responder, ntlmrelayx, a msfconsole handler and
+# a python http.server all bind fine behind default-deny and then catch nothing.
+if grep -qE 'ufw (default deny incoming|--force enable)' /tmp/harden2.log; then
+    fail "harden enabled a default-deny firewall"
+else
+    pass "harden does not enable ufw"
+fi
+
+# sshd is the way back in when the remote-access agent breaks; bluetoothd is what
+# the installed BT tooling drives. Neither may be disabled.
+for u in ssh.service bluetooth.service; do
+    if grep -q "disable.*$u" /tmp/harden2.log; then
+        fail "harden disabled $u"
+    else
+        pass "harden leaves $u alone"
+    fi
+done
+
+# avahi/cups stay off -- Responder needs UDP 5353 free.
+grep -q 'avahi-daemon' /tmp/harden2.log \
+    && pass "harden still frees 5353 (avahi)" \
+    || fail "harden no longer touches avahi -- Responder will not bind 5353"
+
+# MAC cloning is opt-in.
+[[ ! -f "$MACCONF_T" ]] \
+    && pass "no MAC cloning without a flag" \
+    || fail "harden wrote $MACCONF_T with no flag given"
+
+as_sudo --only harden --mac-stable >/tmp/harden3.log 2>&1
+if grep -q '^ethernet.cloned-mac-address=stable' "$MACCONF_T" 2>/dev/null; then
+    pass "--mac-stable writes a per-network MAC"
+else
+    fail "--mac-stable did not write a stable cloned MAC"
+    [[ -f "$MACCONF_T" ]] && sed 's/^/      /' "$MACCONF_T"
+fi
+
+# The remediation path: a box broken by an older run is fixed by re-running.
+as_sudo --only harden >/tmp/harden4.log 2>&1
+[[ ! -f "$MACCONF_T" ]] \
+    && pass "a re-run without flags removes an earlier run's MAC config" \
+    || fail "$MACCONF_T survived a flagless re-run"
+
+# ------------------------------------------------------------------------------
 head_ "T7: failure injection -- a bogus package must not abort the run"
 # ------------------------------------------------------------------------------
 sed 's/^    kali-tools-rfid$/    kali-tools-rfid\n    kali-tools-doesnotexist/' \
