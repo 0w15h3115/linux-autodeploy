@@ -17,7 +17,7 @@ pentest tooling over Tor.
 | **`kali-deploy-physical`** | Physical laptop you sit at | i3 + polybar + kitty, picom on glx | local console, plus sshd |
 | **`kali-deploy-vm`** | Hyper-V guest reached over a remote agent | i3 + polybar + kitty, no compositor | ScreenConnect / ConnectWise Control agent |
 | **`kali-deploy-remote`** | Headless box / cloud teamserver | none | Tailscale SSH + hardened OpenSSH + ufw |
-| **`kali-deploy-remote`** *(on WSL)* | Kali under WSL2 — same script, detected | none | none; the access layer is skipped |
+| **`kali-deploy-wsl`** | Kali as a WSL2 instance on a Windows host | none — Windows Terminal draws the shell | none; you enter with `wsl.exe` |
 | **`test-with-tails`** *(beta)* | Tails OS live session | Tails' own GNOME | everything over Tor; nothing persists |
 
 `kali-deploy-vm` is configuration only — it installs **no tools**, on the basis that
@@ -406,32 +406,86 @@ See `TMUX-TAILSCALE-CHEATSHEET.md`.
 
 ### Kali on WSL
 
-Run the same script — it detects WSL and adjusts itself:
+Use [`kali-deploy-wsl`](#kali-deploy-wsl). This script still detects WSL and skips its
+access layer there, so an existing invocation keeps working, but WSL is no longer its
+target — see the section below for why it moved.
+
+---
+
+## kali-deploy-wsl
+
+Kali as a WSL2 instance on a Windows host: the box you sit at all day and enter with
+`wsl.exe` from Windows Terminal.
 
 ```bash
-sudo ./kali-deploy-remote
+sudo ./kali-deploy-wsl
 ```
 
-A WSL instance is a headless Kali, which is why this lives here rather than in the
-physical script: there is no display, and the terminal drawing it is a Windows
-application, so the font probe the physical script does would answer a question about
-the wrong machine. Only the access layer differs, and it is skipped by default —
-`tailscale` (run Tailscale on the Windows host instead), `ssh` (with `systemd = true`
-in `wsl.conf`, enabling sshd actually takes effect, on a box you enter with
-`wsl.exe`), and `firewall` (WSL2 is NAT'd behind the host; rules naming `tailscale0`
-stage an interface that will never exist). Force one back on with `--only <phase>`.
+### Why it is its own script
 
-The tools phase adds `WSL_PKGS` — `ffuf`, `gobuster`, `sqlmap` — on top of the
-headless set, since a WSL box is a workstation and web tooling is the gap you notice
-first.
+WSL support used to be a detected profile inside `kali-deploy-remote`. It moved because
+that script *is* its access layer — Tailscale SSH, a hardened OpenSSH, and a default-deny
+ufw — and on WSL all three are wrong, so running it there meant running it with the whole
+thing switched off. A target that needs a script's defining feature disabled is a
+different target, not an option of that one, which is the split `SPEC.md` already argues
+for. Here the access layer is **absent**, not skipped: no `tailscale`, no `sshd`, no
+`ufw`, and no phases for them.
 
-Detection keys on WSL's userspace (`/run/WSL`, `/mnt/wsl`, `/init`), never on the
-kernel name: a container shares its host's kernel, so `/proc/sys/kernel/osrelease`
-says `microsoft` inside every container on a WSL2 host — including the one this
-repo's tests run in. R8 pins both directions.
+### What it leaves out
 
-For glyphs in the prompt, install the patched font on the *Windows* side and point
-Windows Terminal at it; `VINNY_ASCII=1` is the fallback.
+| Left out | Why |
+|---|---|
+| i3 / polybar / picom | No X server and no window manager to run one. WSLg gives you GUI *applications*, not a session for a WM to own, so `kali-desktop-i3` installs a stack that cannot start. |
+| kitty | The terminal is a Windows application. Configuring a Linux terminal emulator would configure the wrong machine. |
+| font probing | Same reason — `fc-list` here answers a question about the guest while Windows draws the glyphs. |
+| tailscale / ssh / ufw | Run Tailscale on the *Windows* host; the tailnet is reachable from inside without a second `tailscaled`. WSL2 is NAT'd behind the host, so inbound is Windows Firewall's business. |
+| MAC cloning, monitor mode, bluetooth | The adapters belong to Windows and WSL2 sees none of them. The `802-11`, `wireless`, `bluetooth` and `rfid` metapackages are excluded from `--with-metas` for the same reason. |
+
+### What it adds
+
+A `wslconf` phase — the only phase in this repo that configures the boundary with the
+Windows host rather than anything inside Kali. It writes `/etc/wsl.conf` with `systemd`,
+`[interop]`, and the `automount` **`metadata`** option, that last one being the fix for
+every file under `/mnt/c` reading as `0777 root:root` — which makes `chmod` a no-op, stops
+`ssh` accepting a key stored there, and shows the whole tree as mode-changed in `git`.
+
+The phase is non-destructive by construction: `wsl.conf` is routinely hand-edited, so it
+creates the file, appends a section that is entirely absent, and **never rewrites a
+section that is already there**. Where a section exists but lacks a key, it prints the
+line to add rather than editing around it. Changes need `wsl --shutdown` from Windows,
+which the script says rather than pretends to do.
+
+Windows interop lands in the shell block: `pbcopy` / `pbpaste` against the Windows
+clipboard, `open` (via `wslview` if you have it, else `explorer.exe`), `cdwin` and
+`winhome` for the host profile directory, and `winhost` for the host's IP as seen from
+inside. tmux copy-mode `y` pipes to `clip.exe`, so a selection lands on the clipboard you
+are actually going to paste from.
+
+`wslu` is deliberately **not** installed: Kali carries no such package, and listing a name
+that never resolves is what T1 exists to reject. Adding Debian's repo to a rolling release
+is ruled out by `SPEC.md`. `explorer.exe` covers the gap, and `wslview` is probed at
+runtime in case you install it by hand.
+
+### Tools
+
+The headless set plus `ffuf`, `gobuster` and `sqlmap` — on a workstation those are
+baseline, not an extra. `--with-metas` additionally installs the ten software-only
+`kali-tools-*` metapackages for the breadth `kali-deploy-physical` gives a laptop; it is
+off by default because it is a multi-gigabyte install onto a disk that is a growable file
+on the host's NTFS volume.
+
+### tmux auto-attach is opt-in here
+
+The reverse of `kali-deploy-remote`, where a dropped SSH connection kills your work so
+attaching every login to a persistent session is a straight win. Here every Windows
+Terminal tab is a fresh login shell, and auto-attaching them all to one session means the
+second tab steals the first one's panes. Set `AUTO_TMUX=1` for the remote behaviour.
+
+### Fonts
+
+Install a Nerd Font on the **Windows** side and select it in the Windows Terminal profile.
+Nothing inside the instance can check this, so the script says so instead of ticking it;
+`VINNY_ASCII=1` is the fallback.
 
 ---
 
