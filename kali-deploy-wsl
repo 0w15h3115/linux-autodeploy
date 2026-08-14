@@ -1627,15 +1627,115 @@ if ! has_systemd; then
 SYSTEMD_NOTE
 fi
 
+# The font lives on the Windows side, so this script cannot install it -- but
+# "cannot fix it" is not the same as "cannot say anything useful about it". It
+# can read the host's Windows Terminal settings to see whether a patched face is
+# already selected, and if not, print the exact steps rather than a shrug.
+#
+# Read-only, always. Reaching across to install a font would mean writing to the
+# host's font store and its registry from a Linux deploy script, which is a
+# boundary this repo should not cross uninvited: it is the operator's daily OS,
+# not part of the target being deployed.
+font_face=""
+wt_settings=""
+if win_local=$(sudo -u "$REAL_USER" cmd.exe /c "echo %LOCALAPPDATA%" 2>/dev/null | tr -d '\r') \
+   && [[ -n "$win_local" ]]; then
+    win_local_u=$(wslpath -u "$win_local" 2>/dev/null)
+    wt_settings=$(ls -d "$win_local_u"/Packages/Microsoft.WindowsTerminal*/LocalState/settings.json 2>/dev/null | head -1)
+    # Parse it properly rather than grepping for the first "face" in the file.
+    # settings.json holds one profile per shell, so the first match is as likely
+    # to be PowerShell's as the WSL profile's -- and a green tick earned from
+    # the wrong profile is exactly the kind that teaches you to stop reading
+    # them. Look at the WSL profile, then at profiles.defaults which it
+    # inherits from, and nothing else.
+    if [[ -n "$wt_settings" && -r "$wt_settings" ]]; then
+        font_face=$(python3 - "$wt_settings" 2>/dev/null <<'PYFONT'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8-sig') as fh:
+        d = json.load(fh)
+except Exception:
+    sys.exit(0)
+profiles = d.get('profiles', {})
+if isinstance(profiles, list):
+    lst, defaults = profiles, {}
+else:
+    lst, defaults = profiles.get('list', []), profiles.get('defaults', {})
+for p in lst:
+    if p.get('source') == 'Windows.Terminal.Wsl' or 'kali' in str(p.get('name', '')).lower():
+        face = (p.get('font') or {}).get('face')
+        if face:
+            print(face)
+            sys.exit(0)
+face = (defaults.get('font') or {}).get('face')
+if face:
+    print(face)
+PYFONT
+)
+    fi
+fi
+
+echo ""
+echo "Prompt glyphs (rendered by Windows, not by this box):"
+if [[ "$font_face" == *NF* || "$font_face" == *[Nn]erd* ]]; then
+    echo -e "${GREEN}/${NC} Windows Terminal font: $font_face (patched -- glyphs should render)"
+elif [[ -n "$font_face" ]]; then
+    echo -e "${YELLOW}-${NC} Windows Terminal font: $font_face -- not a Nerd Font, expect tofu"
+    NEED_FONT=1
+else
+    echo -e "${YELLOW}-${NC} No font face set in Windows Terminal (it is using its default)"
+    NEED_FONT=1
+fi
+
+if [[ -n "${NEED_FONT:-}" ]]; then
+    # Specific on purpose. "Install a Nerd Font" is the advice that sends you to
+    # a download page to guess which of 60 archives and which of 4 variants; the
+    # three codepoints below are the ones this prompt actually asks for, and
+    # NFM (Nerd Font Mono) is the variant a terminal wants -- the proportional
+    # one misaligns every column.
+    cat <<FONTHELP
+
+  The dots prompt draws three Nerd Fonts v3 glyphs:
+      U+F0054 arrow    U+E725 branch    U+F4DF hash
+  Kali cannot supply them: Windows Terminal draws this shell, so the font has
+  to be installed on WINDOWS. Installing fonts in here changes nothing.
+
+  From a PowerShell prompt on the host:
+
+    # 1. download (CaskaydiaCove matches Windows Terminal's default look)
+    curl.exe -sLo "\$env:TEMP\CascadiaCode.zip" \`
+      https://github.com/ryanoasis/nerd-fonts/releases/latest/download/CascadiaCode.zip
+    Expand-Archive "\$env:TEMP\CascadiaCode.zip" "\$env:TEMP\nf" -Force
+
+    # 2. install for your user only -- no admin, no reboot
+    \$d = "\$env:LOCALAPPDATA\Microsoft\Windows\Fonts"; mkdir -Force \$d | Out-Null
+    Get-ChildItem "\$env:TEMP\nf\CaskaydiaCoveNerdFontMono-*.ttf" | ForEach-Object {
+      Copy-Item \$_.FullName \$d -Force
+      New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts" \`
+        -Name "\$(\$_.BaseName) (TrueType)" -Value "\$d\\\$(\$_.Name)" -PropertyType String -Force | Out-Null
+    }
+
+  Then set the face on the WSL profile in:
+    ${wt_settings:-%LOCALAPPDATA%\\Packages\\Microsoft.WindowsTerminal_*\\LocalState\\settings.json}
+
+    "profiles": { "list": [ {
+        "source": "Windows.Terminal.Wsl",
+        "font": { "face": "CaskaydiaCove NFM" }
+    } ] }
+
+  Restart Windows Terminal completely -- a newly installed font is not picked
+  up by an already-running instance, and a new tab is not enough.
+
+  Or skip the font entirely: VINNY_ASCII=1 makes the prompt use > @ # instead.
+
+FONTHELP
+fi
+
 # What is only observable by using the box, so the script says it rather than
 # ticking it. Same idea as kali-deploy-vm's closing checklist: a verification
 # line that cannot actually fail teaches you to skim past the ones that can.
 cat <<'UNVERIFIED'
   Not verified by this script:
-    - Whether Windows Terminal is using a Nerd Font. The glyphs in the dots
-      prompt are drawn by Windows, so nothing in here can check. If you see
-      boxes, install a patched font on Windows and select it in the profile,
-      or set VINNY_ASCII=1.
     - Whether /etc/wsl.conf changes have taken effect. They need a
       'wsl --shutdown' from the host, which this script cannot trigger.
     - Whether GUI tools display. WSLg being present means they should; no
