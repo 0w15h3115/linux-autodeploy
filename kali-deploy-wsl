@@ -77,6 +77,10 @@
 #   --dry-run          show what would happen; change nothing
 #   --with-metas       also install the software-only kali-tools-* metapackages
 #   --force            run even if this is not a WSL instance
+#   --keep-shell       do not switch the login shell to zsh. A Kali WSL rootfs
+#                      defaults to bash, and on a bash login ~/.zshrc is never
+#                      sourced -- so by default the shell phase runs chsh, or
+#                      everything it writes reaches nobody.
 #   --skip <phase>     skip a phase (repeatable)
 #   --only <phase>     run only these phases (repeatable)
 #   --list-phases      print phase names and exit
@@ -271,6 +275,13 @@ WSLG_PKGS=(
     mesa-utils      # glxinfo, so the verification pass can prove the d3d12
                     # driver is actually the one in use rather than assuming it
 
+    # The `dconf` command itself. dconf-gsettings-backend is already pulled in
+    # by the GTK stack and is NOT this -- it provides the backend library, not
+    # the binary, so the db-compiling step below found no `dconf` on the first
+    # real run and skipped itself. Another instance of naming the obvious
+    # package and getting a silent no-op.
+    dconf-cli
+
     # Named rather than assumed. It is on a stock Kali image, so on this box it
     # looked present whether or not anything installed it -- which is the ISO's
     # doing and evaporates on a netinst, exactly the case SPEC.md says to name.
@@ -314,6 +325,7 @@ readonly NC='\033[0m'
 DRY_RUN=0
 WITH_METAS=0
 FORCE=0
+KEEP_SHELL=0
 SKIP_PHASES=()
 ONLY_PHASES=()
 
@@ -488,6 +500,7 @@ while (( $# )); do
         --dry-run)      DRY_RUN=1; shift ;;
         --with-metas)   WITH_METAS=1; shift ;;
         --force)        FORCE=1; shift ;;
+        --keep-shell)   KEEP_SHELL=1; shift ;;
         --skip)         [[ -n "${2:-}" ]] || { err "--skip needs a phase"; exit 1; }
                         SKIP_PHASES+=("$2"); shift 2 ;;
         --only)         [[ -n "${2:-}" ]] || { err "--only needs a phase"; exit 1; }
@@ -837,6 +850,66 @@ if should_run wslg; then
         msg "Installing the GUI stack (${#WSLG_PKGS[@]} packages)..."
         apt_install "${WSLG_PKGS[@]}"
 
+        # Installing Mesa is not enough, and this is the part that is not
+        # guessable: WSLg's X server does not advertise DRI3
+        # ("screen 0 does not appear to be DRI3 capable"), so Mesa's automatic
+        # driver selection never reaches the d3d12 gallium driver and silently
+        # settles on llvmpipe. Everything looks installed and everything renders
+        # on the CPU. GALLIUM_DRIVER=d3d12 selects it explicitly.
+        #
+        # MESA_LOADER_DRIVER_OVERRIDE does NOT work here -- measured, not
+        # assumed: it drives the DRI loader, while this needs the gallium
+        # driver picked directly, and setting it leaves you on llvmpipe.
+        #
+        # Written to /etc/profile.d rather than to ~/.zshrc for two reasons: it
+        # is a machine property rather than a user preference, and profile.d is
+        # read by bash and zsh alike -- which matters because a Kali WSL image
+        # defaults to bash, so a zshrc-only setting would reach nobody here.
+        #
+        # PROBED, never assumed. Forcing a gallium driver that cannot load
+        # leaves GL broken outright rather than slow, which is worse than the
+        # problem being solved. So the driver file and /dev/dxg must both exist
+        # AND glxinfo must actually come back with a non-software renderer
+        # before the setting is persisted.
+        wslg_gpu_probe() {
+            local out
+            [[ -e /dev/dxg ]] || return 1
+            [[ -e /usr/lib/x86_64-linux-gnu/dri/d3d12_dri.so ]] || return 1
+            command -v glxinfo &>/dev/null || return 1
+            out=$(sudo -u "$REAL_USER" env DISPLAY="${DISPLAY:-:0}" GALLIUM_DRIVER=d3d12 \
+                  timeout 20 glxinfo -B 2>/dev/null \
+                  | awk -F': ' '/OpenGL renderer string/ {print $2}')
+            [[ -n "$out" && "$out" != *llvmpipe* && "$out" != *softpipe* ]] || return 1
+            echo "$out"
+        }
+
+        if (( DRY_RUN )); then
+            echo -e "${YELLOW}[dry-run]${NC} probe d3d12, then write /etc/profile.d/wslg-gpu.sh"
+        elif gpu_renderer=$(wslg_gpu_probe); then
+            msg "d3d12 probe succeeded: $gpu_renderer"
+            write_file /etc/profile.d/wslg-gpu.sh 644 <<'GPUENV'
+# Written by kali-deploy-wsl.
+#
+# WSLg's X server does not advertise DRI3, so Mesa's automatic driver selection
+# falls back to llvmpipe and every GUI application renders on the CPU while
+# looking perfectly well installed. Selecting the gallium driver explicitly is
+# what binds the GPU Windows passes through as /usr/lib/wsl/lib/libd3d12.so.
+#
+# Verified at deploy time by running glxinfo with this set and confirming the
+# renderer came back as something other than llvmpipe. Delete this file to go
+# back to software rendering.
+export GALLIUM_DRIVER=d3d12
+GPUENV
+            msg "wrote /etc/profile.d/wslg-gpu.sh (read by bash and zsh alike)"
+            msg "  takes effect in the NEXT login shell; export it by hand for this one"
+        else
+            warn "d3d12 did not come back usable -- leaving Mesa on its default."
+            warn "  GUI apps will render on the CPU (llvmpipe). Causes worth checking:"
+            warn "    /dev/dxg missing        -> the host is not exposing the GPU"
+            warn "    d3d12_dri.so missing    -> libgl1-mesa-dri did not install"
+            warn "    no display              -> run this from a shell that has one"
+        fi
+
         # Kali ships /etc/dconf/profile/user declaring `system-db:local`, but
         # never compiles the db that line refers to, so /etc/dconf/db/local does
         # not exist and every GTK application opens with:
@@ -1034,6 +1107,52 @@ EDGE
     # the guest whether it can render a glyph that Windows Terminal draws, so the
     # answer would be about the wrong machine. Install a Nerd Font on Windows and
     # select it in the terminal profile; VINNY_ASCII=1 is the fallback.
+    # Make zsh the login shell, because everything below is written for it.
+    #
+    # This is not a preference, it is the difference between the phase working
+    # and the phase doing nothing. A Kali WSL rootfs defaults to /bin/bash --
+    # unlike the ISO, which ships zsh as the default and is what the rest of
+    # this repo was written against. On a bash login, ~/.zshrc is never sourced,
+    # so the whole block below, the dots hook it guards, lfcd and the interop
+    # aliases all sit on disk and reach nobody. The first real run on a WSL box
+    # ended exactly that way: every phase reported success and the shell was
+    # unchanged.
+    #
+    # SPEC.md already records this failure for kali-deploy-physical, where it
+    # was the rare install path. Here it is the default one.
+    #
+    # chsh only rewrites /etc/passwd; it does not touch the running shell, so
+    # the change lands on the next login -- a new terminal tab. Reversible with
+    # `chsh -s /bin/bash`, and skippable with --keep-shell.
+    if (( KEEP_SHELL )); then
+        msg "--keep-shell: leaving the login shell alone"
+        [[ "$(getent passwd "$REAL_USER" | cut -d: -f7)" != *zsh ]] \
+            && warn "  note: login shell is not zsh, so the block below will not be sourced"
+    else
+        current_shell=$(getent passwd "$REAL_USER" | cut -d: -f7)
+        target_shell=$(command -v zsh || echo /usr/bin/zsh)
+        if [[ "$current_shell" == *zsh ]]; then
+            msg "login shell is already $current_shell"
+        elif [[ ! -x "$target_shell" ]]; then
+            warn "zsh is not installed -- leaving the login shell as $current_shell"
+            warn "  (the tools phase installs it; retry with --only shell afterwards)"
+        else
+            # chsh validates against /etc/shells and fails if zsh is missing
+            # from it, which happens on a rootfs where zsh arrived after the
+            # file was written.
+            grep -qxF "$target_shell" /etc/shells 2>/dev/null \
+                || { msg "adding $target_shell to /etc/shells"; \
+                     run sh -c "echo '$target_shell' >> /etc/shells"; }
+            msg "login shell is $current_shell; the config here is zsh -- switching"
+            if run chsh -s "$target_shell" "$REAL_USER"; then
+                msg "chsh: $REAL_USER -> $target_shell"
+                warn "  takes effect in your NEXT shell -- open a new terminal tab"
+            else
+                warn "chsh failed -- leaving $current_shell (rerun with --only shell)"
+            fi
+        fi
+    fi
+
     ZSHRC="$USER_HOME/.zshrc"
 
     if [[ ! -f "$ZSHRC" ]]; then
@@ -1367,12 +1486,51 @@ done
     && echo -e "${GREEN}/${NC} dots (${DOTS_REPO:-owlshells/dots})" \
     || echo -e "${RED}x${NC} dots (${DOTS_REPO:-owlshells/dots}) -- rerun: sudo $0 --only dots"
 
+# The check that would have caught the first run's silent no-op. Everything
+# above can be green while the shell that reads none of it is the one you get
+# at login, so the login shell is the tick that makes the others mean anything.
+login_shell=$(getent passwd "$REAL_USER" | cut -d: -f7)
+if [[ "$login_shell" == *zsh ]]; then
+    echo -e "${GREEN}/${NC} login shell: $login_shell"
+else
+    echo -e "${RED}x${NC} login shell: $login_shell -- ~/.zshrc is NOT sourced,"
+    echo -e "    so the block this script wrote reaches nothing. Fix with:"
+    echo -e "      chsh -s $(command -v zsh || echo /usr/bin/zsh) $REAL_USER"
+fi
+
 echo ""
 echo "Windows interop:"
-check clip.exe
-check powershell.exe
-check edge            # /usr/local/bin/edge, written by the shell phase
-check wsl-browser     # ditto; \$BROWSER points here
+# These have to be asked in the right context, or they answer a different
+# question than the one that matters. The first real run got four red Xs here
+# on a box where all four were fine.
+#
+# clip.exe and powershell.exe come from the Windows PATH that interop appends to
+# the USER's environment. sudo resets PATH, so checking them from this root
+# shell tests whether root can see them -- which nothing depends on, and which
+# is false on a perfectly good box. Ask as the user who will actually type them.
+check_user() {
+    if sudo -u "$REAL_USER" -H sh -lc "command -v $1 >/dev/null 2>&1"; then
+        echo -e "${GREEN}/${NC} $1"
+    else
+        echo -e "${RED}x${NC} $1 (not on ${REAL_USER}'s PATH)"
+    fi
+}
+
+# For files this script wrote, "is it on PATH" is the wrong question entirely --
+# we know exactly where we put it, so check that, and a stale PATH cannot make
+# a successful install look like a failure.
+check_file() {
+    if [[ -x "$1" ]]; then
+        echo -e "${GREEN}/${NC} $(basename "$1")"
+    else
+        echo -e "${RED}x${NC} $(basename "$1") (expected at $1)"
+    fi
+}
+
+check_user clip.exe
+check_user powershell.exe
+check_file /usr/local/bin/edge
+check_file /usr/local/bin/wsl-browser
 check_opt wslview "not packaged for Kali -- 'open' falls back to explorer.exe"
 [[ -d /mnt/c ]] && echo -e "${GREEN}/${NC} /mnt/c mounted" \
                 || echo -e "${RED}x${NC} /mnt/c not mounted"
@@ -1394,13 +1552,22 @@ if [[ -d /mnt/wslg ]]; then
     # inferring it from a package list: d3d12 means the bridge to the Windows
     # GPU bound, llvmpipe means Mesa fell back to the CPU and every window will
     # feel like it.
+    # Ask as the user, with a display, and with the environment a login shell
+    # will actually have -- i.e. including whatever /etc/profile.d/wslg-gpu.sh
+    # sets. Running this bare from the root shell reports llvmpipe on a box
+    # where GUI apps are about to render on the GPU perfectly well, which is
+    # what the first real run did.
     if command -v glxinfo &>/dev/null; then
-        gl_renderer=$(timeout 15 glxinfo -B 2>/dev/null \
+        gl_renderer=$(sudo -u "$REAL_USER" -H env DISPLAY="${DISPLAY:-:0}" \
+                      sh -lc 'timeout 20 glxinfo -B 2>/dev/null' \
                       | awk -F': ' '/OpenGL renderer string/ {print $2}')
         if [[ -z "$gl_renderer" ]]; then
-            echo -e "${RED}x${NC} GL renderer -- glxinfo returned nothing (no display? try from a GUI shell)"
+            echo -e "${RED}x${NC} GL renderer -- glxinfo returned nothing (is WSLg running?)"
         elif [[ "$gl_renderer" == *llvmpipe* || "$gl_renderer" == *softpipe* ]]; then
-            echo -e "${YELLOW}-${NC} GL renderer: $gl_renderer (software -- GPU not bound)"
+            echo -e "${YELLOW}-${NC} GL renderer: $gl_renderer (software)"
+            echo -e "    /etc/profile.d/wslg-gpu.sh is read at LOGIN, so this is expected"
+            echo -e "    on the run that created it. Open a new shell and re-check with:"
+            echo -e "      glxinfo -B | grep renderer"
         else
             echo -e "${GREEN}/${NC} GL renderer: $gl_renderer"
         fi
