@@ -46,10 +46,16 @@
 #                          rather than falling back to llvmpipe), Firefox, and
 #                          the dconf system db Kali's profile promises but never
 #                          builds. Not a desktop -- see above.
-#   Windows interop        clip.exe-backed pbcopy/pbpaste, wslview for opening a
-#                          URL in the Windows browser, `winhome` for the host
-#                          profile directory, and a tmux copy binding that puts
-#                          the selection on the WINDOWS clipboard.
+#   Windows interop        clip.exe-backed pbcopy/pbpaste, `winhome` for the
+#                          host profile directory, and a tmux copy binding that
+#                          puts the selection on the WINDOWS clipboard.
+#   host-side browsing     the browser session stays on Windows. /usr/local/bin
+#                          gets `edge` and `wsl-browser` as real commands, and
+#                          $BROWSER points at the latter -- so gh, xdg-open and
+#                          anything else that opens a page uses the host
+#                          browser, not just the aliases you type yourself.
+#                          Firefox is still installed, as the deliberate
+#                          exception for traffic going through Burp or ZAP.
 #
 # Installs (native Kali apt only -- no /opt venv, no from-source builds):
 #   nmap/ncat, binwalk, smbclient, hashcat, proxychains4, dns tools, nbtscan,
@@ -937,6 +943,88 @@ fi
 if should_run shell; then
     phase "Phase: shell"
 
+    # The host browser, as the default for anything that opens one.
+    #
+    # An alias only helps when you are the one typing. gh, git web--browse,
+    # xdg-open, Python's webbrowser module and most CLI tools that open a page
+    # read $BROWSER and exec it -- and $BROWSER has to be a real executable,
+    # because a child process cannot call a zsh function. So this is a file on
+    # PATH rather than a shell alias.
+    #
+    # Deliberately NOT gated on WSLg. msedge.exe is a Windows process: it needs
+    # interop, not a Linux display, so this works on WSL1 and on a host with no
+    # WSLg at all -- which is exactly when you want it most, since there is then
+    # no way to draw a Linux browser.
+    #
+    # explorer.exe rather than `cmd.exe /c start`: cmd refuses a UNC working
+    # directory and prints a warning before doing the job, and the script is
+    # usually invoked from somewhere under /home. explorer.exe exits nonzero
+    # even when it succeeds, hence the explicit exit 0 -- without it every tool
+    # that checks $? decides the browser failed and prints its own error.
+    write_file /usr/local/bin/wsl-browser 755 <<'WSLBROWSER'
+#!/bin/sh
+# wsl-browser -- open a URL or file in the WINDOWS default browser, from WSL.
+# Written by kali-deploy-wsl. Referenced by $BROWSER in ~/.zshrc.
+
+[ $# -eq 0 ] && { echo "usage: wsl-browser <url|file> ..." >&2; exit 1; }
+
+for a in "$@"; do
+    # A Windows process cannot follow /home/... -- it needs the
+    # \\wsl.localhost\<distro>\... form. Only translate things that exist, so a
+    # URL is passed through untouched.
+    [ -e "$a" ] && a=$(wslpath -w "$a")
+    explorer.exe "$a" >/dev/null 2>&1
+done
+exit 0
+WSLBROWSER
+    msg "installed /usr/local/bin/wsl-browser (host browser as \$BROWSER)"
+
+    # `edge` as a real command on PATH, not a shell function.
+    #
+    # A function only exists inside an interactive zsh that sourced ~/.zshrc, so
+    # it is unavailable to scripts, to `sudo edge`, to anything spawned by a
+    # tool, and to bash. A file in /usr/local/bin is just a command, and behaves
+    # like one everywhere.
+    #
+    # The install path is probed at RUN time, not baked in at deploy time: Edge
+    # sits under "Program Files (x86)" or "Program Files" depending on channel
+    # and age, and a value captured during a deploy goes stale on the first
+    # major update -- on a machine where the deploy is not going to be re-run.
+    write_file /usr/local/bin/edge 755 <<'EDGE'
+#!/bin/sh
+# edge -- launch Microsoft Edge on the Windows host, from inside WSL.
+# Written by kali-deploy-wsl.
+#
+# This is a WINDOWS process. It does not see this instance's /etc/hosts, it is
+# not affected by proxychains, and its trust store is Windows'. For anything
+# going through Burp or ZAP, use the Linux firefox instead.
+
+EXE=""
+for c in "/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" \
+         "/mnt/c/Program Files/Microsoft/Edge/Application/msedge.exe"; do
+    [ -x "$c" ] && { EXE="$c"; break; }
+done
+
+if [ -z "$EXE" ]; then
+    echo "edge: msedge.exe not found under /mnt/c." >&2
+    echo "      Is Edge installed on the host, and is /mnt/c mounted?" >&2
+    exit 1
+fi
+
+# Translate only arguments that name an existing path; a URL or a --flag is
+# passed through untouched. A Windows process cannot follow /home/...
+for a in "$@"; do
+    if [ -e "$a" ]; then set -- "$@" "$(wslpath -w "$a")"; else set -- "$@" "$a"; fi
+    shift
+done
+
+# Detached, so closing the pane that launched it does not take it down. Edge
+# normally hands off to an already-running session and returns immediately.
+"$EXE" "$@" >/dev/null 2>&1 &
+exit 0
+EDGE
+    msg "installed /usr/local/bin/edge"
+
     # Kali already ships a tuned zsh (syntax highlighting, autosuggestions, a
     # good prompt) and makes it the default shell. We append a marker-guarded
     # block rather than installing Oh My Zsh over the top: faster startup, and no
@@ -1005,6 +1093,27 @@ if command -v wslview &>/dev/null; then
 else
     open() { explorer.exe "\$@" || true; }
 fi
+
+# The browser session stays on the HOST by default.
+#
+# \$BROWSER is what gh, git web--browse, xdg-open and Python's webbrowser module
+# exec when they want to show you a page, so pointing it at wsl-browser is what
+# makes "open a browser from inside WSL" mean the Windows one everywhere --
+# not just when you type \`open\` yourself. Both wsl-browser and edge are real
+# files in /usr/local/bin, so scripts and non-zsh shells get them too.
+#
+#   edge <url|file>   Edge on the host, explicitly.
+#   open <url|file>   the host's default handler, whatever that is.
+#   firefox           the LINUX browser, and the deliberate exception below.
+#
+# Two jobs, and the reason to keep them apart is not speed. Edge is a Windows
+# process: it cannot see this instance's /etc/hosts, proxychains does not apply
+# to it, and its trust store is Windows'. So anything going through Burp or ZAP
+# wants the Linux firefox instead -- that keeps the intercepting CA in a Linux
+# profile rather than the Windows system store, resolves the vhost entries you
+# added here, and keeps engagement traffic out of a browser signed into your
+# personal account and syncing history to it.
+export BROWSER=/usr/local/bin/wsl-browser
 # Windows user profile, resolved at call time rather than baked in at deploy:
 # the path contains the Windows username, which is not knowable from a root
 # shell here (sudo has already scrubbed the environment that would carry it).
@@ -1262,6 +1371,8 @@ echo ""
 echo "Windows interop:"
 check clip.exe
 check powershell.exe
+check edge            # /usr/local/bin/edge, written by the shell phase
+check wsl-browser     # ditto; \$BROWSER points here
 check_opt wslview "not packaged for Kali -- 'open' falls back to explorer.exe"
 [[ -d /mnt/c ]] && echo -e "${GREEN}/${NC} /mnt/c mounted" \
                 || echo -e "${RED}x${NC} /mnt/c not mounted"
@@ -1320,9 +1431,15 @@ cat <<BANNER
   Windows interop:
     somecmd | pbcopy     put output on the Windows clipboard
     pbpaste              read the Windows clipboard
-    open report.html     open with the Windows default handler
     cdwin                cd to your Windows user profile
     winhost              the host's IP as seen from in here
+
+  Browsing (the session stays on the host):
+    edge <url|file>      Edge on Windows; \$BROWSER routes gh/xdg-open here too
+    open <url|file>      the host's default handler
+    firefox <url>        the LINUX browser -- use this one through Burp/ZAP, so
+                         the CA stays out of the Windows store and /etc/hosts
+                         entries actually resolve
 
   tmux (not auto-attached here -- every terminal tab is its own login):
     tn main                start a session      ta main   re-attach

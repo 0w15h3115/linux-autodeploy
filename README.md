@@ -487,13 +487,38 @@ noisy enough to send you debugging a display problem you don't have.
 Verification reads the **renderer**, not the package list — `d3d12` means the GPU bound,
 `llvmpipe` means Mesa fell back to software and every window will feel like it.
 
+### Browsing stays on the host
+
+Opening a page from inside WSL uses the **Windows** browser. Two real executables land in
+`/usr/local/bin` — not shell aliases, so scripts, `sudo`, and non-zsh shells get them too:
+
+| Command | What it is |
+|---|---|
+| `edge <url\|file>` | Edge on the host. Probes both `Program Files` locations at run time, so a Windows update can't stale it. Arguments naming a real file are translated to `\\wsl.localhost\…` paths; URLs and flags pass through. |
+| `wsl-browser <url\|file>` | The host's *default* handler, whatever that is. |
+
+`$BROWSER` points at `wsl-browser`, which is the part an alias can't do: `gh`,
+`git web--browse`, `xdg-open` and Python's `webbrowser` all exec `$BROWSER`, and a child
+process can't call a zsh function. Neither is gated on WSLg — `msedge.exe` is a Windows
+process needing interop, not a Linux display, so both work on WSL1 too.
+
+**Firefox stays, as the deliberate exception.** It's the browser for anything going through
+Burp or ZAP, and the reason isn't speed:
+
+- Burp's CA cert stays in a Linux profile instead of the **Windows system store**, where it
+  would make your daily-driver browser trust an intercepting CA
+- `/etc/hosts` vhost entries you add in Kali actually resolve — Edge uses Windows' resolver
+- `proxychains` and `torsocks` don't apply to a Windows process at all
+- Engagement traffic never touches a browser signed into your personal account and syncing
+  history to it
+
 ### Windows interop
 
-Windows interop lands in the shell block: `pbcopy` / `pbpaste` against the Windows
-clipboard, `open` (via `wslview` if you have it, else `explorer.exe`), `cdwin` and
-`winhome` for the host profile directory, and `winhost` for the host's IP as seen from
-inside. tmux copy-mode `y` pipes to `clip.exe`, so a selection lands on the clipboard you
-are actually going to paste from.
+The rest lands in the shell block: `pbcopy` / `pbpaste` against the Windows clipboard,
+`open` (via `wslview` if you have it, else `explorer.exe`), `cdwin` and `winhome` for the
+host profile directory, and `winhost` for the host's IP as seen from inside. tmux copy-mode
+`y` pipes to `clip.exe`, so a selection lands on the clipboard you are actually going to
+paste from.
 
 `wslu` is deliberately **not** installed: Kali carries no such package, and listing a name
 that never resolves is what T1 exists to reject. Adding Debian's repo to a rolling release
