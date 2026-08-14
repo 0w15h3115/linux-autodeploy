@@ -28,14 +28,28 @@ exists switched off, and a target that needs that is a different target. So the
 access layer is absent from `kali-deploy-wsl` rather than skipped, and the rule
 at the top of this file is what decided it, not an exception to it.
 
-Two things follow, and they are the cost of the split:
+The split is complete: `kali-deploy-remote` no longer knows what WSL is. No
+`is_wsl()`, no default skips, no WSL-only package array. Run it on a WSL box and
+it will install a `tailscaled` and a listening `sshd`, because you asked it to.
 
-- `is_wsl()` is duplicated verbatim, comment and all. It encodes a subtlety that
-  is easy to get wrong in a way no CI run would catch (see below), and a second,
-  looser copy would be the bug. Copied deliberately; keep them identical.
-- `kali-deploy-remote` keeps its WSL detection. Removing it would break R8, which
-  pins the detection in both directions, and an existing invocation on a WSL box
-  still does the right thing. The README points WSL at the new script.
+That is the point. A detection left in "just in case" is a second implementation
+of the decision, and the two drift — one script's idea of WSL stops matching the
+other's, and the bug surfaces on the machine neither was tested on.
+
+`is_wsl()` therefore lives in exactly one place now, `kali-deploy-wsl`, where it
+gates the whole script rather than three phases. It is worth reading before
+touching: it keys on WSL's userspace (`/run/WSL`, `/mnt/wsl`, `/init`) and never
+on the kernel name, because a container shares its host's kernel and
+`/proc/sys/kernel/osrelease` says `microsoft` inside every container on a WSL2
+host — including the one this suite runs in. A `grep microsoft` there would pass
+the gate inside CI containers on a maintainer's WSL laptop and nowhere else.
+
+R8 was inverted rather than deleted. It used to assert the WSL profile fired;
+it now creates `/run/WSL`, runs `kali-deploy-remote`, and asserts that *nothing
+changes* — the access layer still runs, no WSL target is reported, and the web
+tooling is absent from `--print-packages`. A removed special case needs a test
+more than a present one does, because nothing else stops it being reintroduced
+one convenience commit at a time.
 
 ## The requirement everything else follows from
 
