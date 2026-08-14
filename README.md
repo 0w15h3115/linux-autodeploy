@@ -406,9 +406,9 @@ See `TMUX-TAILSCALE-CHEATSHEET.md`.
 
 ### Kali on WSL
 
-Use [`kali-deploy-wsl`](#kali-deploy-wsl). This script still detects WSL and skips its
-access layer there, so an existing invocation keeps working, but WSL is no longer its
-target — see the section below for why it moved.
+Use [`kali-deploy-wsl`](#kali-deploy-wsl). This script has **no WSL handling at all** —
+no detection, no default skips, no WSL-only packages. Run it on a WSL box and it will
+install a `tailscaled` and a listening `sshd`, because that is what you asked for.
 
 ---
 
@@ -430,6 +430,11 @@ thing switched off. A target that needs a script's defining feature disabled is 
 different target, not an option of that one, which is the split `SPEC.md` already argues
 for. Here the access layer is **absent**, not skipped: no `tailscale`, no `sshd`, no
 `ufw`, and no phases for them.
+
+The move is complete in both directions: `kali-deploy-remote` no longer contains
+`is_wsl()` or any WSL branch, and the suite's R8 was inverted to pin that — it creates
+`/run/WSL`, runs the remote script, and asserts nothing changes. A removed special case
+needs a test more than a present one does.
 
 ### What it leaves out
 
