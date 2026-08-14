@@ -14,10 +14,11 @@
 # not skipped: no tailscale, no sshd, no ufw, and no phases for them.
 #
 # What is left out, and why:
-#   i3 / polybar / picom   no X server and no window manager to run one. WSLg
-#                          gives you GUI *applications*, not a session for a WM
-#                          to own, so kali-desktop-i3 installs a stack that
-#                          cannot start.
+#   i3 / polybar / picom   no window manager. WSLg gives each GUI application
+#                          its own Windows window, so there is no session for a
+#                          WM to own and kali-desktop-i3 installs a stack that
+#                          cannot start. GUI *applications* do work -- see the
+#                          wslg phase, which makes them render on the GPU.
 #   kitty                  the terminal is a Windows application. Windows
 #                          Terminal draws this shell, so a Linux terminal
 #                          emulator config would configure the wrong machine.
@@ -39,6 +40,12 @@
 #   wslconf                /etc/wsl.conf -- systemd, interop, and the automount
 #                          metadata option that makes permissions on /mnt/c sane
 #                          instead of every file showing up 777 and root-owned.
+#   wslg                   the GUI stack, when /mnt/wslg says there is a way to
+#                          display a window: Mesa (so applications render on the
+#                          GPU Windows already passes through as libd3d12.so
+#                          rather than falling back to llvmpipe), Firefox, and
+#                          the dconf system db Kali's profile promises but never
+#                          builds. Not a desktop -- see above.
 #   Windows interop        clip.exe-backed pbcopy/pbpaste, wslview for opening a
 #                          URL in the Windows browser, `winhome` for the host
 #                          profile directory, and a tmux copy binding that puts
@@ -72,7 +79,7 @@
 #                      print every binary the verification pass ticks
 #   -h, --help         this message
 #
-# Phases: base tools wslconf tmux shell dots wordlists
+# Phases: base tools wslconf wslg tmux shell dots wordlists
 #
 # Environment knobs (all optional):
 #   DOTS_TOKEN          GitHub token, only needed for a private fork. Without it
@@ -224,7 +231,56 @@ TOOL_METAS=(
     kali-tools-reverse-engineering
 )
 
-readonly ALL_PHASES=(base tools wslconf tmux shell dots wordlists)
+# The GUI stack, installed only when WSLg is actually present: Mesa's userspace
+# plus a browser to have something to point it at.
+#
+# Windows passes the GPU into the instance as /usr/lib/wsl/lib/libd3d12.so (plus
+# libd3d12core and libdxcore). Nothing in Kali uses it on its own: the bridge is
+# Mesa's d3d12 gallium driver, which lives in libgl1-mesa-dri. Without these, a
+# GUI app still runs under WSLg but falls back to software rendering, and
+# Firefox says so in the way that sends you looking for a broken display:
+#
+#   [GFX1-]: glxtest: libpci missing
+#   [GFX1-]: glxtest: libEGL missing
+#   [GFX1-]: glxtest: EGL test failed
+#   [GFX1-]: No GPUs detected via PCI
+#
+# Every one of those four lines is a missing package from this list, not a
+# missing GPU. libpci3 is what lets glxtest enumerate the PCI bus at all, which
+# is why its absence reads as "No GPUs detected".
+#
+# Gated on /mnt/wslg rather than installed unconditionally: on WSL1, or on a
+# Windows build without WSLg, there is no way to display a window and this is
+# ~200MB of driver for nothing. Probing the capability rather than inferring it
+# from a version is the same rule SPEC.md sets for distro version checks.
+#
+# mesa-va-drivers is deliberately absent -- it has no candidate on Kali, and
+# hardware video decode is not what any of this box's tooling needs.
+WSLG_PKGS=(
+    libgl1
+    libegl1
+    libglx-mesa0
+    libgl1-mesa-dri
+    libpci3
+    mesa-utils      # glxinfo, so the verification pass can prove the d3d12
+                    # driver is actually the one in use rather than assuming it
+
+    # Named rather than assumed. It is on a stock Kali image, so on this box it
+    # looked present whether or not anything installed it -- which is the ISO's
+    # doing and evaporates on a netinst, exactly the case SPEC.md says to name.
+    #
+    # It is firefox-esr, not firefox: plain `firefox` has NO candidate on Kali,
+    # so naming the obvious one installs nothing and says nothing, the same
+    # shape of bug as dnsutils -> bind9-dnsutils. The package then diverts
+    # /usr/bin/firefox, so the BINARY to check for is `firefox` while the
+    # PACKAGE is firefox-esr -- the certipy-ad mismatch again, in reverse.
+    #
+    # A browser earns its place on a box with a display: Burp and ZAP need
+    # something to proxy, and an HTML report needs something to open it.
+    firefox-esr
+)
+
+readonly ALL_PHASES=(base tools wslconf wslg tmux shell dots wordlists)
 
 # Binaries the verification pass ticks at the end of a run. BINARY names, not
 # package names -- certipy-ad ships /usr/bin/certipy-ad, while /usr/bin/certipy
@@ -437,7 +493,8 @@ while (( $# )); do
         # says every package the script CAN install, and a set that only appeared
         # under --with-metas would be the one part no test ever looked at.
         --print-packages)
-                        printf '%s\n' "${PKGS[@]}" "${TOOL_METAS[@]}"; exit 0 ;;
+                        printf '%s\n' "${PKGS[@]}" "${WSLG_PKGS[@]}" \
+                                      "${TOOL_METAS[@]}"; exit 0 ;;
         # Every binary the verification pass ticks. Cross-checked against the
         # install closure of --print-packages by the test suite.
         --print-checked-binaries)
@@ -523,9 +580,9 @@ fi
 # GUI applications work, it does not mean a window manager has a session to own,
 # which is why no part of this script installs one.
 if [[ -d /mnt/wslg ]]; then
-    msg "WSLg:      present (GUI apps will display; no WM is installed -- see header)"
+    msg "WSLg:      present (the wslg phase installs the GUI stack; no WM -- see header)"
 else
-    msg "WSLg:      absent (CLI only)"
+    msg "WSLg:      absent (CLI only; the wslg phase will skip itself)"
 fi
 
 (( WITH_METAS )) && msg "Metas:     --with-metas (${#TOOL_METAS[@]} kali-tools-* metapackages)"
@@ -738,6 +795,66 @@ WSLCONF_NEW
         warn "$WSLCONF changed and systemd is not PID 1 yet."
         warn "  From a Windows terminal, run:  wsl --shutdown"
         warn "  then start Kali again. Nothing here needs re-running afterwards."
+    fi
+fi
+
+# ------------------------------------------------------------------------------
+# Phase: wslg -- make GUI applications render on the GPU instead of the CPU
+# ------------------------------------------------------------------------------
+#
+# This is the one place the script touches graphics, and it stops well short of
+# a desktop. No window manager, no compositor, no display manager: WSLg gives
+# each GUI application its own Windows window, so there is no session for a WM
+# to own and installing one gets you a stack that cannot start. What this phase
+# does is narrower -- make the applications that DO run use the GPU Windows is
+# already handing through, and stop GTK complaining on every launch.
+
+if should_run wslg; then
+    phase "Phase: wslg"
+
+    if [[ ! -d /mnt/wslg ]]; then
+        msg "no /mnt/wslg -- no way to display a window here, skipping the GUI stack"
+        msg "  (WSL1, or a Windows build without WSLg. Nothing else needs this.)"
+    else
+        export DEBIAN_FRONTEND=noninteractive
+
+        # The Windows side of the bridge. Absent on WSL1 and on some older
+        # builds; without it the Mesa d3d12 driver has nothing to talk to, so
+        # say that plainly rather than installing drivers that cannot bind.
+        if [[ -e /usr/lib/wsl/lib/libd3d12.so ]]; then
+            msg "GPU passthrough present (/usr/lib/wsl/lib/libd3d12.so)"
+        else
+            warn "no /usr/lib/wsl/lib/libd3d12.so -- Windows is not passing a GPU through."
+            warn "  Mesa still installs; rendering will be software (llvmpipe)."
+        fi
+
+        msg "Installing the GUI stack (${#WSLG_PKGS[@]} packages)..."
+        apt_install "${WSLG_PKGS[@]}"
+
+        # Kali ships /etc/dconf/profile/user declaring `system-db:local`, but
+        # never compiles the db that line refers to, so /etc/dconf/db/local does
+        # not exist and every GTK application opens with:
+        #
+        #   dconf-WARNING **: unable to open file '/etc/dconf/db/local' ...
+        #   expect degraded performance
+        #
+        # Harmless, and alarming enough to send you diagnosing a display problem
+        # you do not have. `dconf update` compiles local.d into the db; the
+        # directory has to exist first, and an empty one is fine -- the point is
+        # that the file the profile promises is actually there.
+        if [[ -f /etc/dconf/profile/user ]] \
+           && grep -q 'system-db:local' /etc/dconf/profile/user 2>/dev/null \
+           && [[ ! -f /etc/dconf/db/local ]]; then
+            msg "compiling the dconf system db Kali's profile references but never built"
+            run mkdir -p /etc/dconf/db/local.d
+            if command -v dconf &>/dev/null; then
+                run dconf update || warn "dconf update failed (cosmetic; GTK warnings will persist)"
+            else
+                warn "dconf binary not present -- skipping (cosmetic only)"
+            fi
+        else
+            msg "dconf system db already consistent"
+        fi
     fi
 fi
 
@@ -1155,6 +1272,32 @@ else
 fi
 has_systemd && echo -e "${GREEN}/${NC} systemd is PID 1" \
             || echo -e "${RED}x${NC} systemd is not PID 1 -- 'wsl --shutdown' from Windows"
+
+if [[ -d /mnt/wslg ]]; then
+    echo ""
+    echo "GUI (WSLg):"
+    check firefox     # the binary is firefox; the package is firefox-esr
+    check glxinfo
+    # The claim worth checking is not "Mesa is installed" but "the GPU is the
+    # thing rendering". glxinfo names the renderer, so read it rather than
+    # inferring it from a package list: d3d12 means the bridge to the Windows
+    # GPU bound, llvmpipe means Mesa fell back to the CPU and every window will
+    # feel like it.
+    if command -v glxinfo &>/dev/null; then
+        gl_renderer=$(timeout 15 glxinfo -B 2>/dev/null \
+                      | awk -F': ' '/OpenGL renderer string/ {print $2}')
+        if [[ -z "$gl_renderer" ]]; then
+            echo -e "${RED}x${NC} GL renderer -- glxinfo returned nothing (no display? try from a GUI shell)"
+        elif [[ "$gl_renderer" == *llvmpipe* || "$gl_renderer" == *softpipe* ]]; then
+            echo -e "${YELLOW}-${NC} GL renderer: $gl_renderer (software -- GPU not bound)"
+        else
+            echo -e "${GREEN}/${NC} GL renderer: $gl_renderer"
+        fi
+    fi
+    [[ -f /etc/dconf/db/local ]] \
+        && echo -e "${GREEN}/${NC} dconf system db (GTK apps start quietly)" \
+        || echo -e "${YELLOW}-${NC} dconf system db absent (harmless GTK warnings on launch)"
+fi
 
 echo ""
 echo "Wordlists:"

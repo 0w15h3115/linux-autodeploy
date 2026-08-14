@@ -435,7 +435,7 @@ for. Here the access layer is **absent**, not skipped: no `tailscale`, no `sshd`
 
 | Left out | Why |
 |---|---|
-| i3 / polybar / picom | No X server and no window manager to run one. WSLg gives you GUI *applications*, not a session for a WM to own, so `kali-desktop-i3` installs a stack that cannot start. |
+| i3 / polybar / picom | No window manager. WSLg gives each GUI application its own Windows window, so there is no session for a WM to own and `kali-desktop-i3` installs a stack that cannot start. GUI *applications* do work — see the `wslg` phase. |
 | kitty | The terminal is a Windows application. Configuring a Linux terminal emulator would configure the wrong machine. |
 | font probing | Same reason — `fc-list` here answers a question about the guest while Windows draws the glyphs. |
 | tailscale / ssh / ufw | Run Tailscale on the *Windows* host; the tailnet is reachable from inside without a second `tailscaled`. WSL2 is NAT'd behind the host, so inbound is Windows Firewall's business. |
@@ -454,6 +454,40 @@ creates the file, appends a section that is entirely absent, and **never rewrite
 section that is already there**. Where a section exists but lacks a key, it prints the
 line to add rather than editing around it. Changes need `wsl --shutdown` from Windows,
 which the script says rather than pretends to do.
+
+### The `wslg` phase — GUI apps on the GPU
+
+Kali under WSL runs GUI applications fine, but renders them on the **CPU** out of the
+box, and the symptom looks like a broken display rather than a missing driver:
+
+```
+[GFX1-]: glxtest: libpci missing
+[GFX1-]: glxtest: libEGL missing
+[GFX1-]: glxtest: EGL test failed
+[GFX1-]: No GPUs detected via PCI
+```
+
+Every one of those lines is a missing package, not a missing GPU. Windows *is* passing
+the GPU through — it appears as `/usr/lib/wsl/lib/libd3d12.so` — but Kali ships no Mesa
+userspace, and Mesa's **d3d12 gallium driver** (in `libgl1-mesa-dri`) is the bridge.
+`libpci3` is what lets `glxtest` enumerate the bus at all, which is why its absence reads
+as *"No GPUs detected"*.
+
+So the phase installs `libgl1`, `libegl1`, `libglx-mesa0`, `libgl1-mesa-dri`, `libpci3`,
+`mesa-utils` and `firefox-esr` — gated on `/mnt/wslg`, since without a way to display a
+window that is ~200MB of driver for nothing. Firefox is **named rather than inherited**:
+it is on a stock image but not on a netinst, and it is `firefox-esr` — plain `firefox` has
+no candidate on Kali, so naming the obvious one installs nothing silently.
+
+The phase also compiles the **dconf system db**. Kali's `/etc/dconf/profile/user` declares
+`system-db:local` but never builds it, so every GTK app opens with an alarming
+`unable to open file '/etc/dconf/db/local' ... expect degraded performance`. Cosmetic, and
+noisy enough to send you debugging a display problem you don't have.
+
+Verification reads the **renderer**, not the package list — `d3d12` means the GPU bound,
+`llvmpipe` means Mesa fell back to software and every window will feel like it.
+
+### Windows interop
 
 Windows interop lands in the shell block: `pbcopy` / `pbpaste` against the Windows
 clipboard, `open` (via `wslview` if you have it, else `explorer.exe`), `cdwin` and
