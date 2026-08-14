@@ -4,15 +4,38 @@ Why these scripts are built the way they are. The README covers usage; this
 covers the reasoning, so that a change doesn't quietly undo a decision that was
 made for a reason.
 
-Applies to `kali-deploy-physical`, `kali-deploy-remote` and `kali-deploy-vm`. The
-Ubuntu scripts in `archive/` predate most of it.
+Applies to `kali-deploy-physical`, `kali-deploy-remote`, `kali-deploy-vm` and
+`kali-deploy-wsl`. The Ubuntu scripts in `archive/` predate most of it.
 
-The three split on target, not on options: hardware you sit at, a headless box you
-reach over Tailscale, and a guest you reach over a remote-desktop agent. That is
-why `kali-deploy-physical` hardcodes `picom --backend glx` and is left that way —
-it is correct on a real GPU, and a VM's graphics stack is `kali-deploy-vm`'s
-problem to have. Teaching one script to detect the other's platform is how both
-end up carrying accommodations neither target needs.
+The four split on target, not on options: hardware you sit at, a headless box you
+reach over Tailscale, a guest you reach over a remote-desktop agent, and a WSL2
+instance you enter with `wsl.exe`. That is why `kali-deploy-physical` hardcodes
+`picom --backend glx` and is left that way — it is correct on a real GPU, and a
+VM's graphics stack is `kali-deploy-vm`'s problem to have. Teaching one script to
+detect the other's platform is how both end up carrying accommodations neither
+target needs.
+
+### Why WSL became the fourth script
+
+It was the third script's detected profile first, and the header there argued the
+case: a WSL instance is a headless Kali, so the headless script should own it.
+
+The test of "same target" is not whether the phases happen to fit, though. It is
+whether the script's *defining* feature applies. `kali-deploy-remote` is its
+access layer — Tailscale SSH, a hardened OpenSSH, ufw — and on WSL all three are
+skipped by default. Running it there meant running it with the entire reason it
+exists switched off, and a target that needs that is a different target. So the
+access layer is absent from `kali-deploy-wsl` rather than skipped, and the rule
+at the top of this file is what decided it, not an exception to it.
+
+Two things follow, and they are the cost of the split:
+
+- `is_wsl()` is duplicated verbatim, comment and all. It encodes a subtlety that
+  is easy to get wrong in a way no CI run would catch (see below), and a second,
+  looser copy would be the bug. Copied deliberately; keep them identical.
+- `kali-deploy-remote` keeps its WSL detection. Removing it would break R8, which
+  pins the detection in both directions, and an existing invocation on a WSL box
+  still does the right thing. The README points WSL at the new script.
 
 ## The requirement everything else follows from
 
@@ -62,6 +85,23 @@ A backup is taken **once**, the first time we are about to replace a file. Copyi
 on every run means the second run overwrites the backup with the config the first
 run generated, so the original is recoverable exactly once — which is to say, not
 when you actually need it.
+
+### A file the operator maintains is added to, never rewritten
+
+Overwrite-with-backup is right for a file the script owns — `~/.tmux.conf` has no
+author but this repo. It is wrong for `/etc/wsl.conf`, which is how you set the
+default user, systemd, and mount behaviour, and which is therefore usually
+hand-edited before any deploy script runs.
+
+So the `wslconf` phase creates the file when absent, appends a section that is
+entirely absent, and never rewrites a section that is already there. Where a
+section exists but lacks a key it wants, it prints the line to add rather than
+editing around it. A `[boot]` that says something we would not have written is a
+decision someone made, and silently reversing it is the kind of surprise that
+costs more trust than the fix was worth.
+
+The same reasoning is why `WSL_HOSTNAME` is opt-in and does nothing if
+`[network]` already exists.
 
 ### Never lock the operator out
 

@@ -15,6 +15,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHYSICAL="kali-deploy-physical"      # scripts under test, repo-relative
 REMOTE="kali-deploy-remote"
 VM="kali-deploy-vm"                  # static analysis only; see CHECK_FILES
+WSL="kali-deploy-wsl"                # static analysis only; see CHECK_FILES
 TAILS="test-with-tails"              # static analysis only; see CHECK_FILES
 IMAGE="kalilinux/kali-rolling:latest"
 STATIC_ONLY=0
@@ -41,10 +42,20 @@ head_ "Static analysis (host)"
 # hyperv phase would no-op and the config phases would be exercised on exactly
 # one branch of the three they were written to choose between -- a green tick
 # that proves nothing about the platform the script exists for.
+#
+# $WSL is static-only because it refuses to run anywhere but WSL. Unlike the
+# remote script, which adapts to WSL and so can be exercised either way, this
+# one exits at pre-flight unless is_wsl() passes -- and is_wsl() is written
+# precisely so that a container on a WSL2 host does NOT pass it (see R8). The
+# suite would therefore be testing --force, a flag that exists for edge cases,
+# against phases whose whole subject is a Windows host the container has no
+# access to: /etc/wsl.conf, clip.exe, /mnt/c. Static analysis is the honest
+# ceiling here; the rest is verified on a real instance.
 CHECK_FILES=(
     "$PHYSICAL"
     "$REMOTE"
     "$VM"
+    "$WSL"
     "$TAILS"
     tests/run-tests.sh
     tests/container-tests.sh
