@@ -908,7 +908,18 @@ bindsym $mod+g split h
 bindsym $mod+v split v
 
 # Fullscreen
-bindsym $mod+f fullscreen toggle
+# owl-maximize (dots/bin) rather than `fullscreen toggle` directly. On a
+# floating window i3's fullscreen covers the whole output including polybar,
+# and `resize set 100 ppt 100 ppt` does not fix it because ppt resolves against
+# the output and not the workspace -- on a 1920x1200 panel with a 32px bar that
+# yields a 1200-tall window straddling the bar. Only i3 knows the workspace
+# rect, so the script asks for it. Tiled windows still get real fullscreen.
+#
+# The `||` matters: the i3 phase runs before the dots phase, so on a first
+# deploy this binding exists before the script does, and on a box where dots is
+# skipped entirely it never arrives. Falling back to plain fullscreen keeps
+# $mod+f working either way. jq, which the script needs, is in EXTRA_PKGS.
+bindsym $mod+f exec --no-startup-id ~/dots/bin/owl-maximize || i3-msg fullscreen toggle
 
 # Layout
 bindsym $mod+s layout stacking
