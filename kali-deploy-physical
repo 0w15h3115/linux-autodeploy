@@ -866,6 +866,15 @@ client.urgent           #b2a1c0 #3a3d42 #dadada #b2a1c0   #b2a1c0
 # Terminal
 bindsym $mod+Return exec kitty
 
+# Browser. firefox is not in this script's package lists and does not need to
+# be: kali-desktop-i3 -> kali-desktop-core Depends on firefox-esr, which ships
+# /usr/bin/firefox as a diversion wrapper. Naming the wrapper rather than
+# firefox-esr keeps this working if the box ever moves to upstream Firefox.
+#
+# --no-startup-id because firefox never clears the startup notification, so
+# without it the pointer keeps its busy cursor until the timeout expires.
+bindsym $mod+b exec --no-startup-id firefox
+
 # Kill window
 bindsym $mod+Shift+q kill
 
@@ -893,7 +902,9 @@ bindsym $mod+Shift+Up move up
 bindsym $mod+Shift+Right move right
 
 # Split
-bindsym $mod+b split h
+# split h is on $mod+g rather than i3's stock $mod+b, which launches the
+# browser above. $mod+v keeps vertical split where everyone expects it.
+bindsym $mod+g split h
 bindsym $mod+v split v
 
 # Fullscreen
