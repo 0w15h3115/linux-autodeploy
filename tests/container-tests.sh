@@ -462,6 +462,15 @@ PSRC
 # Neither can be seen without a display, so what is asserted here is the wiring:
 # the two configs exist, agree on the same image and the same palette, and the
 # locker cannot end up with no fallback on one of its two entry points.
+#
+# The lock screen is split across two phases now and the test follows it. This
+# script's i3 phase writes only the bindings; dots owns the wrapper, the
+# betterlockscreen theme and the patched i3lock, and installs all three from
+# dots/lock/build.sh in the dots phase. So there are two things to check that
+# did not exist when this script wrote the lot: that the i3 phase does NOT
+# write the rc any more (it would clobber the symlink dots puts there), and
+# that the wrapper's fallback is reachable rather than stranded behind an
+# exec.
 t_lock_and_greeter() {
     head_ "T13: lock screen and greeter are configured as one"
 
@@ -473,15 +482,7 @@ t_lock_and_greeter() {
     local gcss=/usr/share/themes/owlshells/gtk-3.0/gtk.css
     local i3conf="$USER_HOME/.config/i3/config"
 
-    [[ -x "$wrapper" ]] \
-        && pass "owl-lock wrapper is executable" \
-        || fail "owl-lock missing or not executable"
-
-    grep -q 'i3lock -c 282828' "$wrapper" 2>/dev/null \
-        && pass "owl-lock falls back to plain i3lock" \
-        || fail "owl-lock has no fallback -- a missing cache would leave the screen unlocked"
-
-    # The asymmetry this wrapper exists to prevent: xss-lock takes a command,
+    # The asymmetry the wrapper exists to prevent: xss-lock takes a command,
     # not a shell expression, so a fallback written inline on the bindsym line
     # would protect the keybinding and silently not protect the idle timeout.
     # Both must route through the wrapper.
@@ -495,24 +496,68 @@ t_lock_and_greeter() {
         grep -nE 'owl-lock|xss-lock|Escape' "$i3conf" | sed 's/^/      /'
     fi
 
+    # The i3 phase must NOT produce these any more. dots symlinks the rc path at
+    # its own copy, so a script that also writes it directly means whichever ran
+    # last wins and a re-deploy silently reverts the lock screen. This is the
+    # regression guard on that: if either reappears here, the split is back.
+    [[ ! -e "$rc" || -L "$rc" ]] \
+        && pass "the i3 phase does not write betterlockscreenrc (dots owns it)" \
+        || fail "the i3 phase wrote $rc -- it would clobber the dots symlink"
+
+    # owl-lock and the theme come from dots/lock/build.sh in the dots phase.
+    # Cloning needs a network and the container has no credentials, so this is
+    # asserted only when that succeeded -- same shape as T10.
+    rm -rf "$USER_HOME/dots"
+    as_sudo --only dots >/tmp/lock2.log 2>&1
+
+    if [[ -x "$wrapper" ]]; then
+        pass "owl-lock installed by the dots phase"
+
+        grep -q 'i3lock -c 282828' "$wrapper" 2>/dev/null \
+            && pass "owl-lock falls back to plain i3lock" \
+            || fail "owl-lock has no fallback -- a missing cache would leave the screen unlocked"
+
+        # The fallback has to be reachable, which it was not for a long time:
+        # `exec betterlockscreen -l || exec i3lock` replaces the process on the
+        # first exec, so betterlockscreen exiting non-zero was the wrapper
+        # exiting non-zero and the || branch was dead code. Assert the shape,
+        # not just the presence, of the fallback.
+        grep -qE '^[[:space:]]*exec[[:space:]]+betterlockscreen' "$wrapper" 2>/dev/null \
+            && fail "owl-lock execs betterlockscreen -- its fallback is unreachable" \
+            || pass "betterlockscreen is not exec'd, so the fallback can actually run"
+
+        # build.sh installs the wrapper before it compiles anything, so a failed
+        # build costs the box and not the lock.
+        if [[ -x /usr/local/bin/i3lock ]] \
+           && /usr/local/bin/i3lock --box-indicator --version >/dev/null 2>&1; then
+            pass "patched i3lock installed and understands --box-indicator"
+        else
+            echo "    (patched i3lock not built here -- the stock locker still applies)"
+        fi
+    else
+        echo "    (dots phase unavailable -- skipping the owl-lock assertions)"
+    fi
+
     # 4.4.0 still reads ~/.config/betterlockscreenrc but prints a migration
     # error on every single invocation, so the XDG path is the only correct one.
-    [[ -f "$rc" ]] \
-        && pass "betterlockscreenrc is at the non-deprecated XDG path" \
-        || fail "no rc at $rc"
-    [[ ! -f "$USER_HOME/.config/betterlockscreenrc" ]] \
-        && pass "nothing written to the deprecated rc path" \
-        || fail "wrote the deprecated ~/.config/betterlockscreenrc"
+    if [[ -e "$rc" ]]; then
+        pass "betterlockscreenrc is at the non-deprecated XDG path"
+        [[ ! -f "$USER_HOME/.config/betterlockscreenrc" ]] \
+            && pass "nothing written to the deprecated rc path" \
+            || fail "wrote the deprecated ~/.config/betterlockscreenrc"
 
-    grep -q 'no-unlock-indicator' "$rc" 2>/dev/null \
-        && pass "the unlock ring is suppressed" \
-        || fail "no --no-unlock-indicator -- the ring will be drawn"
+        grep -q 'box-indicator' "$rc" 2>/dev/null \
+            && pass "the password box replaces the unlock ring" \
+            || fail "no --box-indicator -- the ring will be drawn"
 
-    # lockargs must append: betterlockscreen sets lockargs=(-n) before sourcing
-    # this file, and losing -n breaks xss-lock.
-    grep -q 'lockargs+=(' "$rc" 2>/dev/null \
-        && pass "lockargs appends rather than replacing (-n survives)" \
-        || fail "lockargs assigned rather than appended -- would drop -n/nofork"
+        # lockargs must append: betterlockscreen sets lockargs=(-n) before
+        # sourcing this file, and losing -n breaks xss-lock.
+        grep -q 'lockargs+=(' "$rc" 2>/dev/null \
+            && pass "lockargs appends rather than replacing (-n survives)" \
+            || fail "lockargs assigned rather than appended -- would drop -n/nofork"
+    else
+        echo "    (no betterlockscreenrc -- dots phase did not run)"
+    fi
 
     [[ -f "$gconf" ]] \
         && pass "greeter config written" \
