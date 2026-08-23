@@ -908,12 +908,17 @@ bindsym $mod+g split h
 bindsym $mod+v split v
 
 # Fullscreen
-# owl-maximize (dots/bin) rather than `fullscreen toggle` directly. On a
-# floating window i3's fullscreen covers the whole output including polybar,
-# and `resize set 100 ppt 100 ppt` does not fix it because ppt resolves against
-# the output and not the workspace -- on a 1920x1200 panel with a 32px bar that
-# yields a 1200-tall window straddling the bar. Only i3 knows the workspace
-# rect, so the script asks for it. Tiled windows still get real fullscreen.
+# owl-maximize (dots/bin) rather than `fullscreen toggle`. i3's fullscreen sets
+# _NET_WM_STATE_FULLSCREEN on the window, and any app with a fullscreen mode of
+# its own reacts to it -- Firefox treats it exactly as F11 and hides the tabs,
+# the toolbar and the bookmarks bar. That is the app behaving correctly about a
+# hint i3 is right to set, so the only way to fill the screen and keep the
+# chrome is to never set it: the script resizes to the workspace rect instead.
+#
+# Bounding it by the workspace rather than the output is also what leaves
+# polybar visible, and `resize set 100 ppt 100 ppt` is no substitute -- ppt
+# resolves against the output, so on a 1920x1200 panel with a 32px bar it yields
+# a 1200-tall window at y=16, straddling the bar.
 #
 # The `||` matters: the i3 phase runs before the dots phase, so on a first
 # deploy this binding exists before the script does, and on a box where dots is
