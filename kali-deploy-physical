@@ -924,6 +924,11 @@ client.urgent           #b2a1c0 #3a3d42 #dadada #b2a1c0   #b2a1c0
 # Terminal
 bindsym $mod+Return exec kitty
 
+# Browser. --no-startup-id because firefox does not clear the startup
+# notification, so without it the cursor keeps its busy spinner until the
+# timeout expires.
+bindsym $mod+b exec --no-startup-id firefox
+
 # Kill window
 bindsym $mod+Shift+q kill
 
@@ -960,11 +965,21 @@ bindsym $mod+Shift+Up move up
 bindsym $mod+Shift+Right move right
 
 # Split
-bindsym $mod+b split h
+# split h is on $mod+g, not the stock $mod+b: that one launches the browser.
+bindsym $mod+g split h
 bindsym $mod+v split v
 
 # Fullscreen
-bindsym $mod+f fullscreen toggle
+# owl-maximize, not `fullscreen toggle`. i3's fullscreen sets
+# _NET_WM_STATE_FULLSCREEN, and Firefox treats that exactly as it treats F11:
+# tabs, toolbar and the bookmarks bar all vanish. That is Firefox reacting
+# correctly to a hint i3 is right to set, so the fix is to never set it -- the
+# script resizes the window to the workspace instead, which keeps the browser
+# chrome and leaves polybar visible.
+#
+# Falls back to plain fullscreen if dots is not installed -- the i3 phase runs
+# before the dots phase, so the script can legitimately be absent.
+bindsym $mod+f exec --no-startup-id ~/dots/bin/owl-maximize || i3-msg fullscreen toggle
 
 # Layout
 bindsym $mod+s layout stacking
