@@ -701,6 +701,63 @@ if should_run desktop; then
         rm -rf "$DISCORD_TMP"
     fi
 
+    # --- Claude Desktop, from Anthropic's own apt repo.
+    #
+    # Unlike Discord above, this one is a real signed repo, so it updates with
+    # the rest of the box on `apt upgrade` and needs nothing re-run by hand.
+    #
+    # Linux support is beta, and upstream tests Ubuntu 22.04+ and Debian 12+.
+    # Kali is Debian-testing based and far past the `libc6 (>= 2.34)` floor, so
+    # it resolves cleanly -- but it is explicitly not a combination Anthropic
+    # tests, which is the reason this stays non-fatal like the two above it.
+    #
+    # The key is checked by fingerprint before the repo is registered. This
+    # hands root-level package trust to a third party, and fetching a key over
+    # TLS only proves the CDN served it; comparing the fingerprint is the step
+    # that makes it Anthropic's key rather than whatever the connection
+    # returned. A mismatch means no repo, not a repo trusted anyway.
+    CLAUDE_KEYRING="/usr/share/keyrings/claude-desktop-archive-keyring.asc"
+    CLAUDE_FPR="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+
+    if command -v claude-desktop &>/dev/null; then
+        msg "Claude Desktop already installed"
+    elif (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} add Anthropic's apt repo + install claude-desktop"
+    else
+        msg "Installing Claude Desktop..."
+        if curl -fsSL --retry 3 --connect-timeout 15 \
+                https://downloads.claude.ai/claude-desktop/key.asc \
+                -o "$CLAUDE_KEYRING" \
+           && gpg --show-keys --with-colons "$CLAUDE_KEYRING" 2>/dev/null \
+                | grep -q "^fpr:::::::::${CLAUDE_FPR}:"; then
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=$CLAUDE_KEYRING] https://downloads.claude.ai/claude-desktop/apt/stable stable main" \
+                > /etc/apt/sources.list.d/claude-desktop.list
+            apt-get update || true
+            # Recommends are wanted here: qemu-system-x86, ovmf and virtiofsd
+            # arrive that way, and Cowork reports "Cowork requires QEMU"
+            # without them. Do not add --no-install-recommends.
+            apt-get install -y claude-desktop || warn "Claude Desktop apt install failed"
+        else
+            warn "Anthropic's signing key is missing or has the wrong fingerprint"
+            warn "  -- not registering the repo"
+            rm -f "$CLAUDE_KEYRING"
+        fi
+
+        if command -v claude-desktop &>/dev/null; then
+            # Cowork runs its tasks in a QEMU/KVM guest, and needs
+            # /dev/vhost-vsock as well as /dev/kvm. Some desktops hand the
+            # logged-in user /dev/kvm without the group, but only kvm members
+            # can open vhost-vsock -- so join it either way. Takes effect at the
+            # next login, same as the touchpad file below.
+            if getent group kvm &>/dev/null; then
+                run usermod -aG kvm "$REAL_USER" \
+                    || warn "could not add $REAL_USER to the kvm group (Cowork needs it)"
+            fi
+        else
+            warn "Claude Desktop not installed -- \$mod+c will do nothing"
+        fi
+    fi
+
     # --- Touchpad: natural scrolling.
     #
     # libinput defaults NaturalScrolling to false, which is mouse-wheel
@@ -938,6 +995,10 @@ bindsym $mod+Shift+q kill
 # startup notification, so without it the cursor keeps its busy spinner until
 # the timeout expires -- the same reason $mod+b carries the flag.
 bindsym $mod+d exec --no-startup-id discord
+
+# Claude Desktop. $mod+c was the last unclaimed letter with a mnemonic; note
+# $mod+Shift+c is i3's reload and is a different binding, not a conflict.
+bindsym $mod+c exec --no-startup-id claude-desktop
 
 # Launcher. $mod+p rather than the stock $mod+d, which Discord now has. This is
 # dmenu's own historical binding -- dwm has launched it from Mod+p since dmenu
