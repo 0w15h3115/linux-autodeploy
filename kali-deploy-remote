@@ -482,9 +482,10 @@ if should_run tailscale; then
     if ! command -v tailscale &>/dev/null; then
         msg "Installing Tailscale..."
         run mkdir -p /usr/share/keyrings
-        # Tailscale's signed apt repo (bookworm channel; see note above). This is
-        # the one third-party repo in either script, and it is deliberate: there
-        # is no tailscale package in Kali.
+        # Tailscale's signed apt repo (bookworm channel; see note above). One of
+        # only two third-party repos across these scripts -- the other is
+        # Anthropic's, in kali-deploy-physical -- and it is deliberate: there is
+        # no tailscale package in Kali.
         if (( DRY_RUN )); then
             echo -e "${YELLOW}[dry-run]${NC} add Tailscale apt repo + install tailscale"
         else

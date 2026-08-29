@@ -87,6 +87,17 @@ Kali stages its *own* i3/polybar/kitty configs under `/usr/share/i3-dotfiles/` a
 never copies them into `$HOME`, so they don't collide with these. Worth a look if you
 want to borrow from them.
 
+Claude Desktop is installed from Anthropic's own signed apt repo, so it updates with
+everything else on `apt upgrade`. Its signing key is checked against the published
+fingerprint (`31DD DE24 DDFA B679 F42D  7BD2 BAA9 29FF 1A7E CACE`) *before* the repo is
+registered — a key fetched over TLS only proves the CDN served it, and this grants
+root-level package trust. A mismatch means no repo rather than a repo trusted anyway.
+
+Note that Linux support is beta and upstream tests Ubuntu 22.04+ and Debian 12+, not
+Kali. It resolves and runs, but it's not a combination Anthropic tests, so the install
+is non-fatal. The script also adds you to the `kvm` group, which Cowork needs for the
+QEMU guest it runs tasks in — that takes effect at your next login.
+
 Discord is installed here too, from the vendor `.deb` — it isn't in Kali's repos or
 Debian's, the client being proprietary. That means no apt source and so no updates,
 and Discord refuses to launch once it is behind the current build. When that happens,
@@ -185,9 +196,10 @@ end rather than claiming they passed:
    automatic.
 2. Confirm polybar renders and the battery module finds `BAT0`.
 3. Mod is the **Windows/Super** key. `Mod+Return` kitty, `Mod+b` firefox,
-   `Mod+d` Discord, `Mod+p` dmenu, `Mod+Escape` lock. Discord has `Mod+d`
-   because it is the mnemonic one; dmenu moved to `Mod+p`, which is where dwm
-   has always launched it from.
+   `Mod+c` Claude Desktop, `Mod+d` Discord, `Mod+p` dmenu, `Mod+Escape` lock.
+   Discord has `Mod+d` because it is the mnemonic one; dmenu moved to `Mod+p`,
+   which is where dwm has always launched it from. `Mod+Shift+c` is still i3's
+   reload — a separate binding, not a conflict with `Mod+c`.
 4. Two fingers up on the touchpad should now scroll you *down* the page, not up
    — the desktop phase writes `/etc/X11/xorg.conf.d/40-touchpad.conf` to invert
    libinput's default. X reads that once at server start, so it is in effect
