@@ -1125,16 +1125,17 @@ bindsym XF86AudioLowerVolume exec --no-startup-id wpctl set-volume -l 1.0 @DEFAU
 bindsym XF86AudioMute        exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
 bindsym XF86AudioMicMute     exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
 
-# Lock screen -- manual, plus on suspend. No idle timeout.
+# Lock screen -- manual, on suspend, and after 5 minutes idle.
 #
-# It used to lock after 5 minutes idle (`xset s 300 300`). On a box reached over
-# a remote session that mostly means coming back to a lock screen in the middle
-# of an engagement, and a long-running job you were watching is behind it. The
-# threat it answered -- an unattended unlocked laptop on a conference floor --
-# isn't the one a VM faces. `xset s off` kills the idle timer.
+# The idle timeout is the point of it on this script. An unattended unlocked
+# laptop on a conference floor is the threat a bare-metal box actually faces:
+# it has a lid, it travels, and it gets left on a table. kali-deploy-vm turns
+# the same timer off (`xset s off`) and is right to -- a guest window you reach
+# over a remote session is not sitting unattended in a hostile room, and there
+# the timer only means coming back to a lock screen with a long-running job
+# behind it. That is a VM's tradeoff, and this is not a VM.
 #
-# xss-lock stays: with no screensaver timeout it only fires on suspend, which is
-# worth keeping and costs nothing during normal work.
+# xss-lock covers suspend on top, which on a laptop is the lid.
 #
 # betterlockscreen wraps i3lock-color: it caches a scaled copy of the lock image
 # per resolution and passes the styling from ~/.config/betterlockscreenrc, which
@@ -1157,7 +1158,7 @@ exec --no-startup-id [ -d $HOME/.cache/betterlockscreen ] || \
 
 bindsym $mod+Escape exec --no-startup-id owl-lock
 exec --no-startup-id xss-lock --transfer-sleep-lock -- owl-lock
-exec --no-startup-id xset s off
+exec --no-startup-id xset s 300 300
 I3CONFIG
 
     run chown -R "$REAL_USER:$REAL_USER" "$I3_DIR"
@@ -2142,8 +2143,8 @@ cat <<BANNER
        If it is not running, start it by hand and read the error (a driver with
        no usable GLX backend is the usual one, and 'picom --backend xrender'
        is the fallback).
-    5. Mod+Escape locks the screen. There is no idle timeout -- it locks on
-       suspend and when you ask, and never in the middle of a job.
+    5. Mod+Escape locks the screen. It also locks after 5 minutes idle and on
+       suspend -- this box travels, so the idle timer stays on.
     6. Check monitor mode on your wireless adapter before you rely on it:
            sudo airmon-ng start wlan0
 

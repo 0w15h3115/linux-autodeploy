@@ -116,8 +116,10 @@ them — so the phase does less than its name suggests, on purpose.
   about the rest, so the symptom is a capture that never happens.
 - **MAC cloning off** unless asked for — `--mac-stable` for a per-network MAC,
   `--mac-random` for a fresh one per activation. See the caveat below.
-- **No idle screen lock.** `Mod+Escape` locks on demand and `xss-lock` still
-  locks on suspend; there is no timeout to come back to mid-job.
+- **The idle screen lock stays on** — 5 minutes, plus `xss-lock` on suspend and
+  `Mod+Escape` on demand. `kali-deploy-vm` disables the same timer, which is the
+  right call there; this script is for bare metal that travels, and an
+  unattended unlocked laptop is the threat that actually applies to it.
 
 The verification pass ends with an `ss -tulpn` listing of everything actually
 listening. Read that rather than trusting the toggles.
