@@ -666,6 +666,64 @@ if should_run desktop; then
         rm -rf "$NERD_TMP"
     fi
 
+    # --- Discord. Neither Kali nor Debian package it -- the client is
+    # proprietary -- so it comes from the vendor .deb. That URL is unversioned
+    # and redirects to the current build, which is the only stable handle
+    # upstream publishes.
+    #
+    # `apt-get install ./file.deb` and not `dpkg -i`: the package depends on
+    # libc++1, libatomic1 and the usual Electron X libraries, and dpkg leaves
+    # those unresolved with the package half-configured. apt pulls them in.
+    #
+    # Worth knowing, because it will bite eventually: this tracks nothing and
+    # updates never. There is no apt source behind it, and Discord refuses to
+    # start once it is behind the current build -- it shows the download page
+    # instead. A box deployed months ago therefore needs this re-fetched, which
+    # is `--only desktop` once the guard below is stepped past.
+    #
+    # Non-fatal, like the font above. A box with no network still gets a working
+    # desktop; it just gets a $mod+d that does nothing.
+    if command -v discord &>/dev/null; then
+        msg "Discord already installed"
+    elif (( DRY_RUN )); then
+        echo -e "${YELLOW}[dry-run]${NC} fetch and install the Discord .deb"
+    else
+        msg "Installing Discord..."
+        DISCORD_TMP="$(mktemp -d)"
+        if curl -fsSL --retry 3 --connect-timeout 15 \
+                "https://discord.com/api/download?platform=linux&format=deb" \
+                -o "$DISCORD_TMP/discord.deb" \
+           && apt-get install -y "$DISCORD_TMP/discord.deb"; then
+            msg "Discord installed"
+        else
+            warn "could not install Discord -- \$mod+d will do nothing"
+        fi
+        rm -rf "$DISCORD_TMP"
+    fi
+
+    # --- Touchpad: natural scrolling.
+    #
+    # libinput defaults NaturalScrolling to false, which is mouse-wheel
+    # semantics: two fingers up moves you *up* the document. True makes the
+    # content stick to your fingers instead -- two fingers up drags the page up
+    # the screen and you travel down it, the way a phone does and the way this
+    # box's operator has it on Windows. Kali ships the default; this is a
+    # deliberate inversion of it.
+    #
+    # MatchIsTouchpad keeps it off the TrackPoint and off any external mouse,
+    # where wheel semantics are still the right ones. Note X reads xorg.conf.d
+    # once at server start, so this lands at the next login and not on reload.
+    write_file /etc/X11/xorg.conf.d/40-touchpad.conf <<'TOUCHPADCONF'
+# Written by kali-deploy-physical (desktop phase). See that script for why.
+Section "InputClass"
+    Identifier "touchpad natural scrolling"
+    MatchIsTouchpad "on"
+    Driver "libinput"
+    Option "NaturalScrolling" "true"
+EndSection
+TOUCHPADCONF
+    msg "touchpad set to natural scrolling (takes effect at next login)"
+
 fi
 
 # ------------------------------------------------------------------------------
@@ -869,8 +927,17 @@ bindsym $mod+Return exec kitty
 # Kill window
 bindsym $mod+Shift+q kill
 
-# Launcher
-bindsym $mod+d exec dmenu_run
+# Discord. $mod+d is the mnemonic slot, so it wins it; dmenu moves to $mod+p
+# just below. Installed from the vendor .deb in the desktop phase, which puts a
+# plain `discord` on PATH. --no-startup-id because Electron never clears the
+# startup notification, so without it the cursor keeps its busy spinner until
+# the timeout expires -- the same reason $mod+b carries the flag.
+bindsym $mod+d exec --no-startup-id discord
+
+# Launcher. $mod+p rather than the stock $mod+d, which Discord now has. This is
+# dmenu's own historical binding -- dwm has launched it from Mod+p since dmenu
+# existed -- so it is the least surprising place for it to land.
+bindsym $mod+p exec dmenu_run
 
 # Focus
 bindsym $mod+h focus left

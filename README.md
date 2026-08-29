@@ -87,6 +87,13 @@ Kali stages its *own* i3/polybar/kitty configs under `/usr/share/i3-dotfiles/` a
 never copies them into `$HOME`, so they don't collide with these. Worth a look if you
 want to borrow from them.
 
+Discord is installed here too, from the vendor `.deb` — it isn't in Kali's repos or
+Debian's, the client being proprietary. That means no apt source and so no updates,
+and Discord refuses to launch once it is behind the current build. When that happens,
+re-run the phase (`--only desktop`) after removing the installed package, or fetch the
+`.deb` by hand. The install is non-fatal: no network gets you a desktop and a `Mod+d`
+that does nothing, not a failed deploy.
+
 ### Hardening
 
 Deliberately thin. This is a pentest box, and the controls a general-purpose
@@ -175,9 +182,15 @@ end rather than claiming they passed:
 1. **Pick the i3 session at the LightDM greeter.** Kali defaults to Xfce; i3 is not
    automatic.
 2. Confirm polybar renders and the battery module finds `BAT0`.
-3. Mod is the **Windows/Super** key. `Mod+Return` kitty, `Mod+d` dmenu,
-   `Mod+Escape` lock.
-4. MAC cloning is off unless you passed `--mac-stable` or `--mac-random`; the
+3. Mod is the **Windows/Super** key. `Mod+Return` kitty, `Mod+b` firefox,
+   `Mod+d` Discord, `Mod+p` dmenu, `Mod+Escape` lock. Discord has `Mod+d`
+   because it is the mnemonic one; dmenu moved to `Mod+p`, which is where dwm
+   has always launched it from.
+4. Two fingers up on the touchpad should now scroll you *down* the page, not up
+   — the desktop phase writes `/etc/X11/xorg.conf.d/40-touchpad.conf` to invert
+   libinput's default. X reads that once at server start, so it is in effect
+   from the first i3 session and not before.
+5. MAC cloning is off unless you passed `--mac-stable` or `--mac-random`; the
    `MAC:` line in the verification summary says which. If you did enable it and a
    captive portal or MAC-allowlisted network rejects you, that's why —
    `sudo rm /etc/NetworkManager/conf.d/00-macrandomize.conf`.
@@ -204,7 +217,7 @@ end rather than claiming they passed:
    ```
 
    Re-running the deploy does the same thing for you.
-5. Verify monitor mode before relying on it: `sudo airmon-ng start wlan0`.
+6. Verify monitor mode before relying on it: `sudo airmon-ng start wlan0`.
 
 ### Shell
 
