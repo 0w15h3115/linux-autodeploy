@@ -271,11 +271,6 @@ indistinguishable from a hung one, and an idle lock you didn't ask for means
 typing a password down a laggy link to get back into a session you never left.
 `$mod+Escape` still locks manually.
 
-**No idle lock, no DPMS blanking.** On a remote box a blanked screen is
-indistinguishable from a hung one, and an idle lock you didn't ask for means
-typing a password down a laggy link to get back into a session you never left.
-`$mod+Escape` still locks manually.
-
 **Nothing that assumes hardware.** The battery module, the wireless module and
 the backlight keys are emitted only if `/sys` says the hardware is there — so the
 bar has no permanently-blank `BAT0` and no permanent "wlan down". These are
